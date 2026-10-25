@@ -142,6 +142,8 @@ export const detect = Effect.fn("gitHubChangeRequestTemplate.detect")(function* 
       cwd,
       args: [
         "grep",
+        "-G",
+        "--no-color",
         "-l",
         "-z",
         "--full-name",

@@ -237,6 +237,8 @@ it.effect.each([
   runWithTempDirectory((cwd) =>
     Effect.gen(function* () {
       const path = yield* Path.Path;
+      yield* runGit(cwd, ["config", "grep.patternType", "fixed"]);
+      yield* runGit(cwd, ["config", "color.grep", "always"]);
       yield* writeTemplate(cwd, relativePath, "committed template");
       yield* writeTemplate(cwd, "nested/README.md", "project");
       for (let index = 0; index < 600; index += 1) {

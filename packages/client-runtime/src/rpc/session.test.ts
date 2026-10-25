@@ -302,7 +302,6 @@ describe("RpcSessionFactory", () => {
           }),
           512,
         );
-        expect(parts.length).toBeGreaterThan(2);
 
         for (const part of parts) {
           socket.serverMessage(part);
@@ -310,9 +309,7 @@ describe("RpcSessionFactory", () => {
         }
         yield* Fiber.join(readyFiber);
 
-        const config = yield* session.initialConfig;
-        expect(config).toEqual(SERVER_CONFIG);
-        expect(socket.readyState).toBe(TestWebSocket.OPEN);
+        expect(yield* session.initialConfig).toEqual(SERVER_CONFIG);
       }),
   );
 

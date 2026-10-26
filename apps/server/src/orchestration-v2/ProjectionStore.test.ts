@@ -1318,6 +1318,66 @@ it.effect("lists only active subagent IDs without loading shell data", () =>
   }).pipe(Effect.provide(layerTest)),
 );
 
+// regression: #25621 a shell snapshot binds one SQL variable per thread
+it.effect("reads a shell snapshot with more threads than SQLite has variables", () =>
+  Effect.gen(function* () {
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    const sql = yield* SqlClient.SqlClient;
+    const now = yield* DateTime.now;
+    const seedId = ThreadId.make("thread:many:0");
+    yield* store.apply({
+      id: EventId.make("event:many:created"),
+      type: "thread.created",
+      threadId: seedId,
+      occurredAt: now,
+      payload: {
+        createdBy: "user",
+        creationSource: "web",
+        id: seedId,
+        projectId: ProjectId.make("project:many"),
+        title: "Many threads",
+        providerInstanceId,
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        activeProviderThreadId: null,
+        lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: seedId },
+        forkedFrom: null,
+        createdAt: now,
+        updatedAt: now,
+        archivedAt: null,
+        settledOverride: null,
+        settledAt: null,
+        lastVisitedAt: null,
+        deletedAt: null,
+      },
+    });
+    const threadCount = 32_767;
+    yield* sql`
+      CREATE TEMP TABLE many_threads AS
+      WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ${threadCount - 1})
+      SELECT t.*, 'thread:many:' || n.i AS clone_id
+      FROM orchestration_v2_projection_threads t, n
+      WHERE t.thread_id = ${seedId}
+    `;
+    yield* sql`
+      UPDATE many_threads SET thread_id = clone_id,
+        payload_json = json_set(payload_json, '$.id', clone_id, '$.lineage.rootThreadId', clone_id)
+    `;
+    yield* sql`ALTER TABLE many_threads DROP COLUMN clone_id`;
+    yield* sql`INSERT INTO orchestration_v2_projection_threads SELECT * FROM many_threads`;
+
+    const snapshot = yield* store.getShellSnapshot();
+    assert.strictEqual(snapshot.threads.length, threadCount);
+    assert.include(
+      snapshot.threads.map((thread) => thread.id),
+      ThreadId.make(`thread:many:${threadCount - 1}`),
+    );
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.layer(layerTest)("ProjectionStoreV2", (it) => {
   // regression: #21969 keep corrupt plan JSON in the typed read error
   it.effect("returns a typed read error for malformed stored plan JSON", () =>

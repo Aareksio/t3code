@@ -1318,24 +1318,24 @@ it.effect("lists only active subagent IDs without loading shell data", () =>
   }).pipe(Effect.provide(layerTest)),
 );
 
-// regression: #25621 a shell snapshot binds one SQL variable per thread
-it.effect("reads a shell snapshot with more threads than SQLite has variables", () =>
+// regression: #25621 SQLite rejects statements binding more than 32,766 variables
+it.effect("lists every thread in the shell snapshot past SQLite's bound variable limit", () =>
   Effect.gen(function* () {
     const store = yield* ProjectionStore.ProjectionStoreV2;
     const sql = yield* SqlClient.SqlClient;
     const now = yield* DateTime.now;
-    const seedId = ThreadId.make("thread:many:0");
+    const templateId = ThreadId.make("thread:many:00000");
     yield* store.apply({
-      id: EventId.make("event:many:created"),
+      id: EventId.make(`event:${templateId}:created`),
       type: "thread.created",
-      threadId: seedId,
+      threadId: templateId,
       occurredAt: now,
       payload: {
         createdBy: "user",
         creationSource: "web",
-        id: seedId,
+        id: templateId,
         projectId: ProjectId.make("project:many"),
-        title: "Many threads",
+        title: "Many",
         providerInstanceId,
         modelSelection,
         runtimeMode: "full-access",
@@ -1343,7 +1343,7 @@ it.effect("reads a shell snapshot with more threads than SQLite has variables", 
         branch: null,
         worktreePath: null,
         activeProviderThreadId: null,
-        lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: seedId },
+        lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: templateId },
         forkedFrom: null,
         createdAt: now,
         updatedAt: now,
@@ -1358,23 +1358,27 @@ it.effect("reads a shell snapshot with more threads than SQLite has variables", 
     yield* sql`
       CREATE TEMP TABLE many_threads AS
       WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ${threadCount - 1})
-      SELECT t.*, 'thread:many:' || n.i AS clone_id
-      FROM orchestration_v2_projection_threads t, n
-      WHERE t.thread_id = ${seedId}
+      SELECT t.*, n.i AS clone_index FROM orchestration_v2_projection_threads t, n
+      WHERE t.thread_id = ${templateId}
     `;
     yield* sql`
-      UPDATE many_threads SET thread_id = clone_id,
-        payload_json = json_set(payload_json, '$.id', clone_id, '$.lineage.rootThreadId', clone_id)
+      UPDATE many_threads SET
+        thread_id = printf('thread:many:%05d', clone_index),
+        payload_json = json_set(
+          payload_json,
+          '$.id', printf('thread:many:%05d', clone_index),
+          '$.lineage.rootThreadId', printf('thread:many:%05d', clone_index)
+        )
     `;
-    yield* sql`ALTER TABLE many_threads DROP COLUMN clone_id`;
+    yield* sql`ALTER TABLE many_threads DROP COLUMN clone_index`;
     yield* sql`INSERT INTO orchestration_v2_projection_threads SELECT * FROM many_threads`;
 
-    const snapshot = yield* store.getShellSnapshot();
-    assert.strictEqual(snapshot.threads.length, threadCount);
-    assert.include(
-      snapshot.threads.map((thread) => thread.id),
-      ThreadId.make(`thread:many:${threadCount - 1}`),
-    );
+    const [unscoped, active] = yield* Effect.all([
+      store.getShellSnapshot(),
+      store.getShellSnapshot({ location: "active" }),
+    ]);
+    assert.strictEqual(unscoped.threads.length, threadCount);
+    assert.strictEqual(active.threads.length, threadCount);
   }).pipe(Effect.provide(layerTest)),
 );
 

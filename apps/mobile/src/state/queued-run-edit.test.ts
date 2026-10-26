@@ -13,6 +13,7 @@ import {
   endQueuedRunEdit,
   getQueuedRunEdit,
   recoverQueuedRunEdit,
+  removeQueuedRunEditAttachment,
   queuedEditDraftKey,
   resolveQueuedEditPayload,
   type QueuedRunEdit,
@@ -134,6 +135,18 @@ describe("recoverQueuedRunEdit", () => {
     expect(getComposerDraftSnapshot(editKey).text).toBe("");
     expect(getQueuedRunEdit(threadKey)).toBeNull();
     expect(recovery).toBe("clean");
+  });
+
+  it("recovers text after an existing attachment was removed", async () => {
+    beginQueuedRunEdit(threadKey, edit([image("removed")]));
+    removeQueuedRunEditAttachment(threadKey, "removed");
+
+    const recovery = recoverQueuedRunEdit(threadKey, runId);
+    await flushComposerDrafts();
+
+    expect(getComposerDraftSnapshot(threadKey).text).toBe("original");
+    expect(getQueuedRunEdit(threadKey)).toBeNull();
+    expect(recovery).toBe("kept");
   });
 
   it("recovers a changed edit into an empty thread draft", async () => {

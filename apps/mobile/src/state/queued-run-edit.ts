@@ -23,6 +23,7 @@ export interface QueuedRunEdit {
   readonly runId: RunId;
   readonly messageId: MessageId;
   readonly originalText: string;
+  readonly attachmentsChanged?: boolean;
   readonly existingAttachments: ReadonlyArray<ChatAttachment>;
   readonly context?: OrchestrationMessageContext;
 }
@@ -73,6 +74,9 @@ export function removeQueuedRunEditAttachment(threadKey: string, attachmentId: s
   if (edit === null) return;
   setQueuedRunEdit(threadKey, {
     ...edit,
+    attachmentsChanged:
+      edit.attachmentsChanged ||
+      edit.existingAttachments.some((attachment) => attachment.id === attachmentId),
     existingAttachments: edit.existingAttachments.filter(
       (attachment) => attachment.id !== attachmentId,
     ),
@@ -97,7 +101,11 @@ export function recoverQueuedRunEdit(
   if (edit === null || edit.runId !== runId) return null;
   const editDraftKey = queuedEditDraftKey(threadKey, runId);
   const editDraft = getComposerDraftSnapshot(editDraftKey);
-  if (editDraft.text === edit.originalText && editDraft.attachments.length === 0) {
+  if (
+    !edit.attachmentsChanged &&
+    editDraft.text === edit.originalText &&
+    editDraft.attachments.length === 0
+  ) {
     endQueuedRunEdit(threadKey);
     return "clean";
   }

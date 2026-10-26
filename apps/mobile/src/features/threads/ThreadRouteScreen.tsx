@@ -431,6 +431,7 @@ function ThreadRouteContent(
   ]);
 
   useEffect(() => {
+    // oxlint-disable-next-line react/set-state-in-effect -- Inspector selection follows route ownership but keeps an inspector the user opened.
     setInspectorSelection((current) => {
       if (props.renderInspector === undefined) {
         if (current === null || current.mode === "route") {
@@ -558,14 +559,14 @@ function ThreadRouteContent(
   };
   const safeAreaInsets = useSafeAreaInsets();
   const inspectorHeaderInset = Platform.OS === "ios" ? 0 : safeAreaInsets.top;
-  const GitInspector = () => (
+  const renderGitInspector = () => (
     <GitOverviewSheet
       headerInset={inspectorHeaderInset}
       presentation="inspector"
       route={{ params: { environmentId: environmentId!, threadId: threadId! } }}
     />
   );
-  const FilesInspector = () =>
+  const renderFilesInspector = () =>
     selectedThread !== null && selectedThreadCwd !== null ? (
       <ThreadFileNavigatorPane
         cwd={selectedThreadCwd}
@@ -576,7 +577,7 @@ function ThreadRouteContent(
         onSelectFile={handleSelectInspectorFile}
       />
     ) : null;
-  const RouteInspector = () => props.renderInspector?.(inspectorHeaderInset);
+  const renderRouteInspector = () => props.renderInspector?.(inspectorHeaderInset);
   const renderPreviewInspector = () =>
     previewTarget && panes.auxiliaryPaneVisible ? (
       <ThreadInspectorPreview
@@ -600,11 +601,11 @@ function ThreadRouteContent(
     inspectorMode === null ? null : (
       <ThreadInspectorContentStack
         renderPreview={renderPreviewInspector}
-        renderFiles={FilesInspector}
-        renderGit={GitInspector}
+        renderFiles={renderFilesInspector}
+        renderGit={renderGitInspector}
         mode={inspectorMode}
         resetKeys={[routeThreadIdentity, selectedThreadCwd]}
-        renderRoute={props.renderInspector ? RouteInspector : undefined}
+        renderRoute={props.renderInspector ? renderRouteInspector : undefined}
       />
     );
   const activeInspectorRenderer =

@@ -24,6 +24,10 @@
         "namespaceImportPackages": ["@effect/platform-node", "effect"],
         "effectFn": ["span", "inferred-span", "suggested-span"],
         "diagnosticSeverity": {
+          "abortControllerInEffect": "error",
+          "runEffectInsideEffect": "error",
+          "flatMapConditionalToFilterOrFail": "error",
+          "catchConditionalRefailToCatchIf": "error",
           "tryCatchInEffectGen": "error",
           "schemaStructWithTag": "error",
           "preferTypedSchemaDecoder": "error",
@@ -42,6 +46,7 @@
           "flatMapIgnoredParamToAndThen": "error",
           "mapSomeToAsSome": "error",
           "unnecessaryPipeChain": "error",
+          "returnEffectInGen": "off",
           "effectFnOpportunity": "suggestion",
           "anyUnknownInErrorContext": "error",
           "unsafeEffectTypeAssertion": "error",

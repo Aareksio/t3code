@@ -1118,7 +1118,9 @@ describe("deleted thread worktrees", () => {
               outcome: "kept",
               reason: "Has uncommitted changes (1 file)",
             });
-            yield* fixture.fs.writeFileString(`${fixture.worktree}/tracked.txt`, "original\n");
+            yield* fixture.fs
+              .writeFileString(`${fixture.worktree}/tracked.txt`, "original\n")
+              .pipe(Effect.orDie);
             fixture.setSessionLive(false);
           }),
         );

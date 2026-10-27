@@ -1651,6 +1651,12 @@ it("OWN-03 passes a reported conflict and fails reuse or close of the owner's se
     failed(c.expect, trace("", "Acme iPhone is in use by another thread, so I stopped.")),
     [],
   );
+  // Run-7 wordings: the error code itself, and "another automation session".
+  for (const text of [
+    "Blocked by `DEVICE_IN_USE`; I left that session alone.",
+    "It was locked by another automation session.",
+  ])
+    assert.deepEqual(failed(c.expect, trace("", text)), [], text);
   assert.isNotEmpty(
     failed(
       c.expect,

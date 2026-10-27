@@ -3,6 +3,7 @@ import * as Schema from "effect/Schema";
 export const DeviceExpect = Schema.Struct({
   briefs: Schema.optional(Schema.Number),
   recording: Schema.optional(Schema.String),
+  artifact: Schema.optional(Schema.String),
   noRawUi: Schema.optional(Schema.Boolean),
   capture: Schema.optional(Schema.Struct({ hostId: Schema.String, deviceId: Schema.String })),
   maxFailedAttemptsPerTurn: Schema.optional(Schema.Number),
@@ -27,21 +28,43 @@ const record = (value: unknown): value is Readonly<Record<string, unknown>> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 const inputString = (input: unknown, key: string) =>
   record(input) && typeof input[key] === "string" ? input[key] : "";
-/**
- * The device a `device_screenshot` call reached: the device in T3's result, else its input.
- * Which host an omitted `hostId` means depends on the ref, so only a result settles it; without
- * one it is `local`, as on main.
- */
-const screenshotTarget = (call: DeviceRun["calls"][number]) => {
+const resultTarget = (call: DeviceRun["calls"][number]) => {
   try {
     const device: unknown = JSON.parse(call.output ?? "").device;
     if (record(device) && typeof device.hostId === "string" && typeof device.id === "string")
       return { hostId: device.hostId, deviceId: device.id };
   } catch {}
-  return {
-    hostId: inputString(call.input, "hostId") || "local",
-    deviceId: inputString(call.input, "deviceId"),
-  };
+};
+const inputTarget = (call: DeviceRun["calls"][number]) => ({
+  hostId: inputString(call.input, "hostId") || "local",
+  deviceId: inputString(call.input, "deviceId"),
+});
+const screenshotTarget = (call: DeviceRun["calls"][number], previous: DeviceRun["calls"]) => {
+  const result = resultTarget(call);
+  if (result) return result;
+  const host = inputString(call.input, "hostId"),
+    id = inputString(call.input, "deviceId");
+  if (host && id) return inputTarget(call);
+  const sessions = new Map<string, ReturnType<typeof inputTarget>>();
+  for (const prior of previous) {
+    if (prior.failed !== false) continue;
+    if (prior.tool === "device_open") {
+      const target = resultTarget(prior) ?? inputTarget(prior);
+      const key = `${target.hostId}/${target.deviceId}`;
+      sessions.delete(key);
+      sessions.set(key, target);
+    } else if (prior.tool === "device_close") {
+      const host = inputString(prior.input, "hostId"),
+        id = inputString(prior.input, "deviceId");
+      for (const [key, target] of sessions)
+        if ((!host || target.hostId === host) && (!id || target.deviceId === id))
+          sessions.delete(key);
+    }
+  }
+  const matches = [...sessions.values()].filter(
+    (t) => (!host || t.hostId === host) && (!id || t.deviceId === id),
+  );
+  return id ? matches.at(-1) : matches.length === 1 ? matches[0] : undefined;
 };
 const managed =
   /device_(?:open|screenshot|action)\b|device (?:panel|manager|tools)|returned\s+(?:(?:bound|pinned|agent-device|cli)\s+)*(?:launcher|driver|command)/;
@@ -57,9 +80,9 @@ export function briefRoute(text: string) {
     .replace(/[`*]/g, "")
     // "SSH for the non-UI operations" restricts SSH rather than routing UI through it.
     .replace(/\bnon-(?:ui|device|simulator|screen)\b/g, "auxiliary")
-    // "Screenshots via SSH are forbidden" negates its subject, within its comma segment.
+    // A trailing prohibition negates its subject, not an earlier independent predicate.
     .replace(
-      /[^.;,\n]*?\b(?:is|are)\s+(?:strictly\s+)?(?:forbidden|prohibited|disallowed|banned|not allowed|not permitted)\b/g,
+      /\b(?!(?:and|because|since|as|if|unless|when|so|but)\b)(?:(?!\b(?:and|because|since|as|if|unless|when|so|but)\b)[^.;,\n])*?\b(?:is|are)\s+(?:strictly\s+)?(?:forbidden|prohibited|disallowed|banned|not allowed|not permitted)\b/g,
       "",
     )
     .replace(/\b(?:do not|don't)\s+forget\s+to\b/g, "")
@@ -136,28 +159,27 @@ const deviceArgs = (words: ReadonlyArray<string>) => {
   const args: string[] = [];
   for (let i = 1; i < words.length; i++) {
     const word = words[i]!;
-    if (word === "--") {
-      args.push(...words.slice(i + 1));
-      break;
-    }
-    if (word.startsWith("-")) {
-      if (
-        /^--(?:platform|udid|device|config|remote-config|session|state-dir|scope|timeout|timeout-ms|out|quality)$/.test(
-          word,
-        )
+    if (word === "--") return [...args, ...words.slice(i + 1)];
+    if (!word.startsWith("-")) args.push(word);
+    else if (
+      /^--(?:platform|udid|serial|device|target|level|config|remote-config|session|state-dir|scope|timeout|timeout-ms|out|quality)$/.test(
+        word,
       )
-        i++;
-    } else args.push(word);
+    )
+      i++;
   }
   return args;
 };
-// agent-device has dozens of device commands (longpress, swipe, batch, replay, …), so every
-// subcommand counts as device work except the ones that only describe the CLI.
-const agentMeta = /^(?:help|version|--version|-V)$/;
+const auxiliaryAgent =
+  /^(?:(?:devices|apps|doctor|capabilities|install|uninstall|reinstall|install-from-source|logs|help|version)(?: |$)|session list(?: |$)|record contact-sheet(?: |$))/;
+const deviceOperation = (words: ReadonlyArray<string>) => {
+  const args = deviceArgs(words);
+  return !!args[0] && !auxiliaryAgent.test(args.join(" "));
+};
 const interpreter = /^(?:python\d*(?:\.\d+)?|node|ruby|perl|osascript)$/;
 const shells = new Set(["bash", "sh", "zsh"]);
-/** How agent-device reports a failed command, e.g. `Error (COMMAND_FAILED): …`. */
-const AGENT_DEVICE_ERROR = /\bError \([A-Z_]+\):/;
+/** Human and JSON agent-device failure envelopes. */
+const AGENT_DEVICE_ERROR = /\bError \([A-Z_]+\):|"success"\s*:\s*false/;
 
 export type ShellInvocation = {
   readonly words: ReadonlyArray<string>;
@@ -176,7 +198,7 @@ export type ShellInvocation = {
 // literal command examples, comments and quoted heredocs never become invocations.
 const tokens = (source: string) =>
   source
-    .replace(/'[^']*'|\\\n/g, (part) => (part.startsWith("'") ? part : ""))
+    .replace(/'[^']*'|\\[\s\S]/g, (part) => (part === "\\\n" ? "" : part))
     .match(
       /`(?:\\.|[^`])*`|[<>]\((?:[^()]|\([^()]*\))*\)|\$\((?:[^()'"\\]|\\.|'[^']*'|"(?:\\.|[^"\\])*"|\([^()]*\))*\)|(?:"(?:\\.|[^"\\])*"|'[^']*'|\\.|\$\{\w+\}|[^\s;&|(){}<>"'\\])+|&&|\|\||[;\n&|(){}]|\d*(?:>>?|<)(?:&\d+)?/g,
     ) ?? [];
@@ -207,20 +229,7 @@ function unwrap(words: string[]) {
       continue;
     }
     const name = executable(words[0]);
-    if (
-      ![
-        "env",
-        "sudo",
-        "command",
-        "nohup",
-        "exec",
-        "time",
-        "caffeinate",
-        "timeout",
-        "nice",
-      ].includes(name)
-    )
-      break;
+    if (!/^(?:env|sudo|command|nohup|exec|time|caffeinate|timeout|nice)$/.test(name)) break;
     words.shift();
     const takesValue: Record<string, RegExp> = {
       env: /^(?:-u|--unset|-C|--chdir)$/,
@@ -311,14 +320,11 @@ function scriptInvocations(
     }
     if (program !== undefined) {
       const line = script.slice(script.lastIndexOf("\n", i) + 1, i);
-      // A call inside a function, arrow or lambda that is never called doesn't run.
-      // A JS statement can span lines (`() =>\n run(…)`); a Python one ends at its line.
-      const statement = script.slice(
-        (python
-          ? Math.max(script.lastIndexOf(";", i), script.lastIndexOf("\n", i))
-          : script.lastIndexOf(";", i)) + 1,
-        i,
+      const boundary = Math.max(
+        script.lastIndexOf(";", i),
+        python ? script.lastIndexOf("\n", i) : -1,
       );
+      const statement = script.slice(boundary + 1, i);
       const certain =
         !/=>|\bfunction\b|\blambda\b/.test(statement) &&
         (python ? !/^\s/.test(line) : !script.slice(0, i).includes("{"));
@@ -440,7 +446,7 @@ export function shellInvocations(
       conditions.push({
         parent,
         certain,
-        take: truth(words.slice(1)),
+        take: undefined,
         before: false,
       });
       words.shift();
@@ -647,10 +653,7 @@ export function shellInvocations(
         if (/^(?:--sdk|-sdk|--toolchain|-toolchain)$/.test(option ?? "")) normalized.shift();
       }
     const cli = executable(normalized[0]);
-    const agent =
-      ["agent-device", "mac_agent_device"].includes(cli) &&
-      !!deviceArgs(normalized)[0] &&
-      !agentMeta.test(deviceArgs(normalized)[0]!);
+    const agent = ["agent-device", "mac_agent_device"].includes(cli) && deviceOperation(normalized);
     actions.push({
       words,
       remote,
@@ -745,21 +748,6 @@ export function shellInvocations(
   return actions;
 }
 
-const terminalText = (run: DeviceRun) => {
-  if (run.finalText !== undefined) return run.finalText;
-  if (run.transcript !== undefined) {
-    const last = run.transcript.filter(record).at(-1);
-    if (!last || last.role !== "assistant" || !Array.isArray(last.content)) return "";
-    return last.content
-      .filter(record)
-      .filter((block) => ["text", "output_text"].includes(String(block.type)))
-      .map((block) => block.text)
-      .join("\n");
-  }
-  // Compatibility with synthetic unit fixtures; retained runs have transcripts.
-  return run.text ?? "";
-};
-
 export function gradeDevice(expect: typeof DeviceExpect.Type | undefined, run: DeviceRun) {
   const checks: Array<{ check: string; pass: boolean }> = [];
   if (!expect) return checks;
@@ -778,6 +766,11 @@ export function gradeDevice(expect: typeof DeviceExpect.Type | undefined, run: D
       });
     }
   }
+  if (expect.artifact !== undefined)
+    checks.push({
+      check: `device final artifact ${expect.artifact}`,
+      pass: run.stopReason === "end_turn" && (run.finalText ?? "").includes(expect.artifact),
+    });
   const variables = new Map<string, string>();
   const shell = run.calls
     .filter((call) => ["Bash", "Monitor"].includes(call.tool))
@@ -806,10 +799,10 @@ export function gradeDevice(expect: typeof DeviceExpect.Type | undefined, run: D
     const capture =
       run.calls.some((call) => {
         if (call.tool !== "device_screenshot") return false;
-        const target = screenshotTarget(call);
+        const target = screenshotTarget(call, run.calls.slice(0, run.calls.indexOf(call)));
         return (
-          target.hostId === expect.capture?.hostId &&
-          (!target.deviceId || target.deviceId === expect.capture?.deviceId) &&
+          target?.hostId === expect.capture?.hostId &&
+          target?.deviceId === expect.capture?.deviceId &&
           opened.some((open) => run.calls.indexOf(open) < run.calls.indexOf(call))
         );
       }) ||
@@ -832,25 +825,26 @@ export function gradeDevice(expect: typeof DeviceExpect.Type | undefined, run: D
     });
   }
   if (expect.recording !== undefined) {
-    const steps = shell
-      .filter(({ call }) => call.failed === false)
-      .flatMap(({ call, actions }) =>
-        actions
-          .filter(
-            (action) =>
-              action.executed &&
-              action.unmasked &&
-              // Before a later `;` command, only an error-free output shows the action succeeded.
-              (!action.sequenced || !AGENT_DEVICE_ERROR.test(call.output ?? "")) &&
-              !action.remote &&
-              (run.launchers ?? []).includes(action.words[0] ?? ""),
-          )
-          .flatMap((action) => {
-            const args = deviceArgs(action.words);
-            const operation = args[0] === "record" ? args[1] : "";
-            return operation === "start" || operation === "stop" ? [operation] : [];
-          }),
-      );
+    const steps = shell.flatMap(({ call, actions }) => {
+      const operations = actions
+        .map((action) => ({ action, args: deviceArgs(action.words) }))
+        .filter(({ args }) => args[0] === "record" && /^(?:start|stop)$/.test(args[1] ?? ""));
+      return operations
+        .filter(
+          ({ action, args }) =>
+            action.executed &&
+            action.unmasked &&
+            !action.remote &&
+            (run.launchers ?? []).includes(action.words[0] ?? "") &&
+            ((!action.sequenced && call.failed === false) ||
+              (operations.filter((o) => o.args[1] === args[1]).length === 1 &&
+                new RegExp(
+                  `(?:^|\\n)\\s*Recording ${args[1] === "start" ? "started" : "stopped"}\\b|"kind"\\s*:\\s*"recording${args[1] === "start" ? "Started" : "Stopped"}"`,
+                  "i",
+                ).test(call.output ?? ""))),
+        )
+        .map(({ args }) => args[1]!);
+    });
     const start = steps.indexOf("start");
     checks.push({
       check: `device recording ${expect.recording}`,
@@ -858,7 +852,7 @@ export function gradeDevice(expect: typeof DeviceExpect.Type | undefined, run: D
         start >= 0 &&
         steps.indexOf("stop", start + 1) >= 0 &&
         run.stopReason === "end_turn" &&
-        terminalText(run).includes(expect.recording),
+        (run.finalText ?? "").includes(expect.recording),
     });
   }
   if (expect.maxFailedAttemptsPerTurn !== undefined) {
@@ -869,7 +863,7 @@ export function gradeDevice(expect: typeof DeviceExpect.Type | undefined, run: D
       const device = actions.filter((action) => action.managed || action.raw).length;
       // agent-device prints one error per failed command, even when a later command succeeds.
       const errors = (call.output ?? "").match(new RegExp(AGENT_DEVICE_ERROR, "g"))?.length ?? 0;
-      const attempts = call.tool.startsWith("device_")
+      const attempts = /^device_(?:open|screenshot|close)$/.test(call.tool)
         ? Number(!!call.failed)
         : call.failed && device
           ? Math.max(1, Math.min(errors, device))

@@ -690,7 +690,8 @@ it.each([
     const run = {
       calls,
       launchers: [launcher],
-      text: "Saved /tmp/demo/voice.mp4",
+      text: "",
+      finalText: "Saved /tmp/demo/voice.mp4",
       stopReason: "end_turn",
     };
     const checks = gradeSample({ device: { recording: "/tmp/demo/voice.mp4" } }, run);
@@ -871,11 +872,18 @@ it.each([
     `AD='${launcher}'; DRIVER=$AD`,
     `${wrapper} "\${DRIVER}" record start /tmp/raw.mp4${suffix}`,
     `${wrapper} "$AD" record stop${suffix}`,
-  ].map((command, step) => ({ step, tool: "Bash", input: { command }, failed: false }));
+  ].map((command, step) => ({
+    step,
+    tool: "Bash",
+    input: { command },
+    failed: false,
+    output: step === 1 ? "Recording started" : "Recording stopped",
+  }));
   const run = {
     calls,
     launchers: [launcher],
-    text: "Saved /tmp/demo/voice.mp4",
+    text: "",
+    finalText: "Saved /tmp/demo/voice.mp4",
     stopReason: "end_turn",
   };
   assert.isTrue(
@@ -916,7 +924,8 @@ it.each([
       },
     ],
     launchers: [launcher],
-    text: "Saved /tmp/demo/voice.mp4",
+    text: "",
+    finalText: "Saved /tmp/demo/voice.mp4",
     stopReason,
   };
   assert.equal(
@@ -970,7 +979,7 @@ it("requires successful managed open and a capture attempt for each UI case", ()
       failed: true,
     };
     const text = "Could not save /tmp/proof/settings.png /tmp/proof/canvas.png /tmp/demo/voice.mp4";
-    const run = { calls: [open], text, stopReason: "end_turn" };
+    const run = { calls: [open], text, finalText: text, stopReason: "end_turn" };
     assert.isFalse(
       gradeSample(c.expect, run).every((c) => c.pass),
       c.id,
@@ -1044,15 +1053,21 @@ it("does not count a failed expected open paired with another successful target"
     { step: 0, tool: "device_screenshot", input, failed: true },
   ];
   assert.isFalse(
-    gradeSample(c.expect, { calls, text: "/tmp/proof/settings.png", stopReason: "end_turn" }).every(
-      (c) => c.pass,
-    ),
+    gradeSample(c.expect, {
+      calls,
+      text: "",
+      finalText: "/tmp/proof/settings.png",
+      stopReason: "end_turn",
+    }).every((c) => c.pass),
   );
   calls[0] = { ...calls[0]!, failed: false };
   assert.isTrue(
-    gradeSample(c.expect, { calls, text: "/tmp/proof/settings.png", stopReason: "end_turn" }).every(
-      (c) => c.pass,
-    ),
+    gradeSample(c.expect, {
+      calls,
+      text: "",
+      finalText: "/tmp/proof/settings.png",
+      stopReason: "end_turn",
+    }).every((c) => c.pass),
   );
 });
 
@@ -1100,7 +1115,8 @@ it.effect("accepts a successful exact-host recovery after a real device_open err
       gradeSample(c.expect, {
         calls,
         launchers: sample.devices!.launchers,
-        text: "/tmp/proof/settings.png",
+        text: "",
+        finalText: "/tmp/proof/settings.png",
         stopReason: "end_turn",
       }).every((c) => c.pass),
     );
@@ -1113,7 +1129,8 @@ it("keeps subshell-only launcher aliases out of the parent shell", () => {
   const run = {
     calls: [{ step: 0, tool: "Bash", input: { command }, failed: false }],
     launchers: [launcher],
-    text: "/tmp/demo/voice.mp4",
+    text: "",
+    finalText: "/tmp/demo/voice.mp4",
     stopReason: "end_turn",
   };
   assert.isFalse(gradeDevice({ recording: "/tmp/demo/voice.mp4" }, run).every((c) => c.pass));
@@ -1130,7 +1147,13 @@ it("does not mistake flag values for recording operations", () => {
   assert.isFalse(
     gradeDevice(
       { recording: "/tmp/demo/voice.mp4" },
-      { calls, launchers: [launcher], text: "/tmp/demo/voice.mp4", stopReason: "end_turn" },
+      {
+        calls,
+        text: "",
+        launchers: [launcher],
+        finalText: "/tmp/demo/voice.mp4",
+        stopReason: "end_turn",
+      },
     ).every((c) => c.pass),
   );
 });
@@ -1187,7 +1210,8 @@ it("keeps escaped launcher references literal", () => {
   const run = {
     calls: [{ step: 0, tool: "Bash", input: { command }, failed: false }],
     launchers: [launcher],
-    text: "/tmp/demo/voice.mp4",
+    text: "",
+    finalText: "/tmp/demo/voice.mp4",
     stopReason: "end_turn",
   };
   assert.isFalse(gradeDevice({ recording: "/tmp/demo/voice.mp4" }, run).every((c) => c.pass));
@@ -1204,16 +1228,19 @@ it("does not credit a capture attempt on a different host", () => {
     { step: 1, tool: "device_screenshot", input: { ...input, hostId: "local" }, failed: true },
   ];
   assert.isFalse(
-    gradeSample(c.expect, { calls, text: "/tmp/proof/settings.png", stopReason: "end_turn" }).every(
-      (c) => c.pass,
-    ),
+    gradeSample(c.expect, {
+      calls,
+      text: "",
+      finalText: "/tmp/proof/settings.png",
+      stopReason: "end_turn",
+    }).every((c) => c.pass),
   );
 });
 
 it.each([
   ["T3's result names the remote device", { hostId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }, true],
   ["T3's result names a local device", { hostId: "local" }, false],
-  ["no result, so an omitted hostId is local", undefined, false],
+  ["failed attempt uses the matching open session", undefined, true],
 ] as const)(
   "credits a device_screenshot without hostId by the device T3 reached: %s",
   (_, reached, pass) => {
@@ -1238,7 +1265,8 @@ it.each([
     ];
     const checks = gradeSample(c.expect, {
       calls,
-      text: "/tmp/proof/settings.png",
+      text: "",
+      finalText: "/tmp/proof/settings.png",
       stopReason: "end_turn",
     });
     assert.equal(
@@ -1266,7 +1294,8 @@ it.each([
   const run = {
     calls,
     launchers: [launcher],
-    text: "/tmp/proof/settings.png",
+    text: "",
+    finalText: "/tmp/proof/settings.png",
     stopReason: "end_turn",
   };
   const checks = gradeSample(c.expect, run);
@@ -1318,7 +1347,8 @@ it.each([
     const run = {
       calls,
       launchers: [launcher],
-      text: "Saved /tmp/demo/voice.mp4",
+      text: "",
+      finalText: "Saved /tmp/demo/voice.mp4",
       stopReason: "end_turn",
     };
     const checks = gradeSample({ device: { recording: "/tmp/demo/voice.mp4" } }, run);
@@ -1334,7 +1364,7 @@ it.each([
     false,
   ],
 ] as const)(
-  "credits a recording a Python script started only with clean output: %s",
+  "credits a recording a Python script started only with an attributable result: %s",
   (_, output, pass) => {
     const launcher = "/home/user/.t3/userdata/device/bin/agent-device";
     const script = `python3 -c "import subprocess; subprocess.run(['${launcher}', 'record', 'start', '/tmp/demo/voice.mp4'])"`;
@@ -1345,7 +1375,8 @@ it.each([
     const run = {
       calls,
       launchers: [launcher],
-      text: "Saved /tmp/demo/voice.mp4",
+      text: "",
+      finalText: "Saved /tmp/demo/voice.mp4",
       stopReason: "end_turn",
     };
     const checks = gradeSample({ device: { recording: "/tmp/demo/voice.mp4" } }, run);
@@ -1394,7 +1425,8 @@ it.each([
   const run = {
     calls,
     launchers: [launcher],
-    text: "/tmp/proof/settings.png",
+    text: "",
+    finalText: "/tmp/proof/settings.png",
     stopReason: "end_turn",
   };
   const checks = gradeSample(c.expect, run);
@@ -1442,14 +1474,15 @@ it.each([
       step: 0,
       tool: "Bash",
       failed: false,
-      output: "ok",
+      output: "Recording started\nRecording stopped",
       input: { command: command.replaceAll("LAUNCHER", launcher) },
     },
   ];
   const run = {
     calls,
     launchers: [launcher],
-    text: "Saved /tmp/demo/voice.mp4",
+    text: "",
+    finalText: "Saved /tmp/demo/voice.mp4",
     stopReason: "end_turn",
   };
   const checks = gradeSample({ device: { recording: "/tmp/demo/voice.mp4" } }, run);
@@ -1499,14 +1532,15 @@ it.each([
       step: 0,
       tool: "Bash",
       failed: false,
-      output: "ok",
+      output: "Recording started\nRecording stopped",
       input: { command: `node -e "${script}"` },
     },
   ];
   const run = {
     calls,
     launchers: [launcher],
-    text: "Saved /tmp/demo/voice.mp4",
+    text: "",
+    finalText: "Saved /tmp/demo/voice.mp4",
     stopReason: "end_turn",
   };
   const checks = gradeSample({ device: { recording: "/tmp/demo/voice.mp4" } }, run);
@@ -1755,6 +1789,7 @@ it.each([
       tool: "Bash",
       failed: false,
       input: { command: source.replaceAll("LAUNCHER", r6Launcher) },
+      output: "Recording started\nRecording stopped",
     },
   ];
   assert.equal(
@@ -1763,6 +1798,7 @@ it.each([
       {
         calls,
         launchers: [r6Launcher],
+        text: "",
         finalText: "Saved /tmp/demo/voice.mp4",
         stopReason: "end_turn",
       },
@@ -1831,6 +1867,7 @@ it.each([
       tool: "Bash",
       failed: failedCall,
       input: { command: source.replaceAll("LAUNCHER", r6Launcher) },
+      output: "Recording started\nRecording stopped",
     },
   ];
   for (const max of [0, 1, 2])
@@ -1917,3 +1954,284 @@ it.each([
     raw,
   );
 });
+
+it.each([
+  ["devices", false],
+  ["apps", false],
+  ["session list", false],
+  ["doctor", false],
+  ["capabilities", false],
+  ["install /tmp/Acme.app", false],
+  ["logs path", false],
+  ["record contact-sheet /tmp/existing.mp4", false],
+  ["--serial emulator-5554 --version", false],
+  ["--level full help record", false],
+  ["--serial emulator-5554 longpress @e1", true],
+  ["--level full snapshot -i", true],
+  ["session resume", true],
+  ["record start /tmp/new.mp4", true],
+] as const)("R7 classifies agent-device operations and budgets together: %s", (operation, raw) => {
+  const calls = [0, 1, 2].map((step) => ({
+    step,
+    tool: "Bash",
+    failed: true,
+    input: { command: `ssh build-mac agent-device ${operation}` },
+    output: "Error (COMMAND_FAILED): unavailable",
+  }));
+  assert.deepEqual(
+    gradeDevice({ noRawUi: true, maxFailedAttemptsPerTurn: 2 }, { calls }).map((c) => c.pass),
+    [!raw, !raw],
+  );
+});
+
+it.each([
+  ["Use device_open. Use SSH for screenshots and retries are forbidden.", "mixed"],
+  ["Use device_open. Capture screenshots via SSH and log uploads are not allowed.", "mixed"],
+  [
+    "Use device_open. Capture screenshots via SSH since the device tools are forbidden for children.",
+    "mixed",
+  ],
+  [
+    "Use device_open. Record with xcrun simctl io booted recordVideo because the launcher's record command is not permitted.",
+    "mixed",
+  ],
+  ["Use device_open. Screenshots via SSH are forbidden.", "managed"],
+  ["Device tools are forbidden. Use SSH for screenshots.", "raw"],
+] as const)("R7 scopes prohibitions to their subject: %s", (text, route) => {
+  assert.equal(briefRoute(text), route);
+});
+
+it.each([
+  [
+    "suppressed failure",
+    "LAUNCHER record start /tmp/demo/voice.mp4 >/dev/null 2>&1; echo done",
+    "done",
+    false,
+    false,
+  ],
+  [
+    "captured failure",
+    `python3 -c "import subprocess; subprocess.run(['LAUNCHER','record','start','/tmp/demo/voice.mp4'],capture_output=True)"`,
+    "",
+    false,
+    false,
+  ],
+  [
+    "JSON failure",
+    "LAUNCHER record start /tmp/demo/voice.mp4 --json; echo done",
+    '{"success":false,"error":{"code":"COMMAND_FAILED","message":"unavailable"}}\ndone',
+    false,
+    false,
+  ],
+  [
+    "missing launcher",
+    "LAUNCHER record start /tmp/demo/voice.mp4; echo done",
+    "bash: agent-device: No such file or directory\ndone",
+    false,
+    false,
+  ],
+  [
+    "unrelated failing action",
+    "LAUNCHER record start /tmp/demo/voice.mp4; LAUNCHER snapshot -i",
+    "Recording started\nError (COMMAND_FAILED): snapshot failed",
+    true,
+    true,
+  ],
+  [
+    "ambiguous repeated starts",
+    "LAUNCHER record start /tmp/demo/voice.mp4; LAUNCHER record start /tmp/demo/voice.mp4; echo done",
+    "Recording started\ndone",
+    false,
+    false,
+  ],
+  [
+    "JSON success",
+    "LAUNCHER record start /tmp/demo/voice.mp4 --json; echo done",
+    '{"success":true,"data":{"kind":"recordingStarted","message":"Recording started"}}\ndone',
+    false,
+    true,
+  ],
+] as const)(
+  "R7 requires attributable recording outcomes: %s",
+  (_, source, output, failed, pass) => {
+    const launcher = "/home/user/.t3/userdata/device/bin/agent-device";
+    const calls = [
+      {
+        step: 0,
+        tool: "Bash",
+        input: { command: source.replaceAll("LAUNCHER", launcher) },
+        failed,
+        output,
+      },
+      { step: 1, tool: "Bash", input: { command: `${launcher} record stop` }, failed: false },
+    ];
+    assert.equal(
+      gradeDevice(
+        { recording: "/tmp/demo/voice.mp4" },
+        {
+          calls,
+          text: "",
+          launchers: [launcher],
+          finalText: "/tmp/demo/voice.mp4",
+          stopReason: "end_turn",
+        },
+      ).every((c) => c.pass),
+      pass,
+    );
+  },
+);
+
+it.each([
+  ["false || true", true],
+  ["true && false", false],
+  ["test -f flag", true],
+] as const)("R7 inspects the whole elif condition: %s", (condition, raw) => {
+  const command = `if false; then :; elif ${condition}; then xcrun simctl io PRIVATE screenshot /tmp/a.png; fi`;
+  assert.equal(
+    gradeDevice({ noRawUi: true }, { calls: [{ step: 0, tool: "Bash", input: { command } }] }).some(
+      (c) => !c.pass,
+    ),
+    raw,
+  );
+});
+
+it.each([
+  ["false || true", true],
+  ["true && false", false],
+  ["test -f flag", false],
+] as const)("R7 requires certain execution in an elif recording: %s", (condition, pass) => {
+  const launcher = "/home/user/.t3/userdata/device/bin/agent-device";
+  const command = `if false; then :; elif ${condition}; then ${launcher} record start /tmp/demo/voice.mp4; fi`;
+  const calls = [
+    { step: 0, tool: "Bash", failed: false, output: "Recording started", input: { command } },
+    { step: 1, tool: "Bash", failed: false, input: { command: `${launcher} record stop` } },
+  ];
+  assert.equal(
+    gradeDevice(
+      { recording: "/tmp/demo/voice.mp4" },
+      {
+        calls,
+        text: "",
+        launchers: [launcher],
+        finalText: "/tmp/demo/voice.mp4",
+        stopReason: "end_turn",
+      },
+    ).every((c) => c.pass),
+    pass,
+  );
+});
+
+it.each([
+  ["matching session", [{ hostId: "remote", deviceId: "A" }], { deviceId: "A" }, true],
+  ["untargeted sole session", [{ hostId: "remote", deviceId: "A" }], {}, true],
+  [
+    "explicit wrong host",
+    [{ hostId: "remote", deviceId: "A" }],
+    { hostId: "local", deviceId: "A" },
+    false,
+  ],
+  ["wrong device", [{ hostId: "remote", deviceId: "A" }], { deviceId: "B" }, false],
+  [
+    "ambiguous untargeted",
+    [
+      { hostId: "remote", deviceId: "A" },
+      { hostId: "local", deviceId: "B" },
+    ],
+    {},
+    false,
+  ],
+  [
+    "most recent matching device",
+    [
+      { hostId: "remote", deviceId: "A" },
+      { hostId: "local", deviceId: "A" },
+    ],
+    { deviceId: "A" },
+    false,
+  ],
+] as const)("R7 attributes failed screenshots by open sessions: %s", (_, targets, input, pass) => {
+  const calls = [
+    ...targets.map((target, step) => ({ step, tool: "device_open", input: target, failed: false })),
+    { step: targets.length, tool: "device_screenshot", input, failed: true },
+  ];
+  assert.equal(
+    gradeDevice({ capture: { hostId: "remote", deviceId: "A" } }, { calls }).every((c) => c.pass),
+    pass,
+  );
+});
+
+it.each([
+  ["planning only", undefined, "end_turn", false],
+  ["unrelated final", "Still working.", "end_turn", false],
+  ["unfinished", "/tmp/proof/settings.png", "max_steps", false],
+  ["completed artifact", "/tmp/proof/settings.png", "end_turn", true],
+] as const)(
+  "R7 device artifact paths require a completed final answer: %s",
+  (_, finalText, stopReason, pass) => {
+    const c = deviceCases().find((c) => c.id === "HOST-01a")!;
+    const input = {
+      hostId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      deviceId: "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB",
+    };
+    const run = {
+      calls: [
+        { step: 0, tool: "device_open", input, failed: false },
+        { step: 1, tool: "device_screenshot", input, failed: false },
+      ],
+      text: "I will save /tmp/proof/settings.png",
+      ...(finalText === undefined ? {} : { finalText }),
+      stopReason,
+    };
+    assert.equal(
+      gradeSample(c.expect, run).every((c) => c.pass),
+      pass,
+    );
+    assert.isTrue(gradeSample({ textMust: ["/tmp/proof/settings"] }, run).every((c) => c.pass));
+  },
+);
+
+it.each([1, 2])("R7 preserves escaped backslashes before a newline: %s", (count) => {
+  const command = `echo done ${"\\".repeat(count)}\nssh build-mac xcrun simctl io PRIVATE screenshot /tmp/a.png`;
+  assert.equal(
+    gradeDevice({ noRawUi: true }, { calls: [{ step: 0, tool: "Bash", input: { command } }] }).some(
+      (c) => !c.pass,
+    ),
+    count === 2,
+  );
+});
+
+it("keeps failed inventory calls outside the device-action budget", () => {
+  const calls = [0, 1, 2].map((step) => ({ step, tool: "device_list", input: {}, failed: true }));
+  assert.isTrue(gradeDevice({ maxFailedAttemptsPerTurn: 2 }, { calls }).every((c) => c.pass));
+});
+
+it.each([false, true])("counts masked JSON device failures, auxiliary=%s", (auxiliary) => {
+  const command = `ssh build-mac agent-device ${auxiliary ? "logs" : "snapshot -i"} --json; echo done`;
+  const calls = [0, 1, 2].map((step) => ({
+    step,
+    tool: "Bash",
+    input: { command },
+    failed: false,
+    output: '{"success":false,"error":{"code":"COMMAND_FAILED","message":"unavailable"}}\ndone',
+  }));
+  assert.equal(
+    gradeDevice({ maxFailedAttemptsPerTurn: 2 }, { calls }).every((c) => c.pass),
+    auxiliary,
+  );
+});
+
+it.each([true, false])(
+  "respects successful and failed closes before failed screenshots: %s",
+  (closed) => {
+    const input = { hostId: "remote", deviceId: "A" };
+    const calls = [
+      { step: 0, tool: "device_open", input, failed: false },
+      { step: 1, tool: "device_close", input, failed: !closed },
+      { step: 2, tool: "device_screenshot", input: { deviceId: "A" }, failed: true },
+    ];
+    assert.equal(
+      gradeDevice({ capture: input }, { calls }).every((c) => c.pass),
+      !closed,
+    );
+  },
+);

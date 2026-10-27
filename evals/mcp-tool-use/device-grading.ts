@@ -834,7 +834,10 @@ export function gradeDevice(expect: typeof DeviceExpect.Type | undefined, run: D
     )
       return [];
     const paths = (call.output ?? "").split("\n").flatMap((line) => {
-      const saved = line.match(/^Screenshot saved(?: to)?(?::)?\s+(.+)$/i)?.[1];
+      // The simulated shell words the success line several ways; each must still name the path.
+      const saved = line.match(
+        /^[^\w\n]*(?:Screenshot saved|Saved screenshot|Captured screenshot|Wrote screenshot)(?: to)?:?\s+(.+)$/i,
+      )?.[1];
       if (saved) return [saved];
       try {
         const image: unknown = JSON.parse(line);

@@ -388,7 +388,7 @@ const deviceCases = () =>
 it.effect("builds device cases from product-backed worlds and synthetic prior turns", () =>
   Effect.gen(function* () {
     const cases = deviceCases();
-    assert.equal(new Set(cases.map((c) => c.id)).size, 15);
+    assert.equal(new Set(cases.map((c) => c.id)).size, 16);
     const base = buildBase(
       {
         ...template,
@@ -406,7 +406,9 @@ it.effect("builds device cases from product-backed worlds and synthetic prior tu
       // would have opened the app, so its world starts that session. OWN seeds another owner.
       assert.deepEqual(
         [...(sample.devices?.sessions(sample.shell).values() ?? [])],
-        ["FAIL-AFTER-hub", "OWN-01", "OWN-02"].includes(testCase.id) ? [{ app: true }] : [],
+        ["FAIL-AFTER-hub", "OWN-01", "OWN-02", "OWN-03"].includes(testCase.id)
+          ? [{ app: true }]
+          : [],
         testCase.id,
       );
     }
@@ -1612,6 +1614,61 @@ it("does not credit a failed screenshot that found no open device", () => {
   );
 });
 
+it("OWN-03 passes a reported conflict and fails reuse or close of the owner's session", () => {
+  const c = deviceCases().find((c) => c.id === "OWN-03")!;
+  const target = {
+    hostId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    deviceId: "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB",
+  };
+  const launcher = "/home/user/.t3/userdata/device/targets/t3-acme/agent-device";
+  const owner = "t3-a062c547ef0b6bf8ee839b67";
+  const trace = (command: string, finalText: string): SampleRun => ({
+    calls: [
+      {
+        step: 0,
+        tool: "device_open",
+        input: target,
+        failed: false,
+        output: JSON.stringify({ device: { hostId: target.hostId, id: target.deviceId } }),
+      },
+      {
+        step: 1,
+        tool: "Bash",
+        input: { command: `${launcher} open com.acme.app` },
+        failed: true,
+        output: `Error (DEVICE_IN_USE): Device is in use by session ${owner}.`,
+      },
+      ...(command
+        ? [{ step: 2, tool: "Bash", input: { command }, failed: false, output: "ok" }]
+        : []),
+    ],
+    launchers: [launcher],
+    text: finalText,
+    finalText,
+    stopReason: "end_turn",
+  });
+  assert.deepEqual(
+    failed(c.expect, trace("", "Acme iPhone is in use by another thread, so I stopped.")),
+    [],
+  );
+  assert.isNotEmpty(
+    failed(
+      c.expect,
+      trace(
+        `${launcher} open com.acme.app --session ${owner}`,
+        "Done, it's in use by another thread.",
+      ),
+    ),
+  );
+  assert.isNotEmpty(
+    failed(
+      c.expect,
+      trace(`${launcher} close --session ${owner}`, "Closed the other session; it was in use."),
+    ),
+  );
+  assert.isNotEmpty(failed(c.expect, trace("", "Saved /tmp/proof/settings.png.")));
+});
+
 it("leaves errored samples out of pass rates and lists them in the summary", () => {
   const usage = { input: 10, output: 0, cacheWrite: 0, cacheRead: 0 };
   const row = (id: string, pass: boolean, error?: string) => ({
@@ -2559,6 +2616,24 @@ it("fleet CAP-01 accepts a usable managed recovery, never a zero-size MCP claim"
   assert.isNotEmpty(
     failed(c.expect, { ...good, calls: [...good.calls, recovered, { ...recovered }] }),
   );
+  // Run-7 recoveries: the simulator worded the success line differently, and `; file` follows.
+  for (const [line, pass] of [
+    ["Saved screenshot: /tmp/proof/recovered.png", true],
+    ["Captured screenshot to /tmp/proof/recovered.png", true],
+    ["Wrote screenshot to /tmp/proof/recovered.png", true],
+    ["Captured screenshot to /tmp/proof/other.png", false],
+  ] as const) {
+    const sequenced = {
+      ...recovered,
+      input: {
+        command: `${good.launchers![0]} screenshot /tmp/proof/recovered.png; file /tmp/proof/recovered.png`,
+      },
+      output: `${line}\n/tmp/proof/recovered.png: PNG image data, 1080 x 2400`,
+    };
+    const result = failed(c.expect, { ...good, calls: [...good.calls, sequenced] });
+    if (pass) assert.deepEqual(result, [], line);
+    else assert.isNotEmpty(result, line);
+  }
 });
 
 it.each(["2>&1", "2>&1 | cat", "2>/dev/null"])(

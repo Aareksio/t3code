@@ -904,10 +904,9 @@ it.each([
   );
 });
 
-it("counts every failed aliased managed invocation, including several attempts in one call", () => {
+it("counts separately observed failed calls without multiplying aggregate failures", () => {
   const launcher = "/home/user/.t3/device/bin/agent-device";
   for (const commands of [
-    [`AD=${launcher}; $AD snapshot -i; $AD screenshot /tmp/a.png; $AD snapshot -i`],
     [0, 1, 2].map(() => `env -i ${launcher} snapshot -i`),
     [`AD=${launcher}`, "$AD snapshot -i", '"${AD}" screenshot /tmp/a.png', "$AD snapshot -i"],
   ]) {
@@ -1224,3 +1223,373 @@ it.each(["couldn't", "couldn’t", "can’t"])(
     assert.isTrue(checks.filter((c) => c.check.startsWith("textMust")).every((c) => c.pass));
   },
 );
+
+const r6Raw = "xcrun simctl io PRIVATE screenshot /tmp/proof.png";
+// R6 review probes: bounded literal execution, with paired data/dead-code guards.
+it.each([
+  ["safe-not-required", "Use device_open. SSH is not required for screenshots.", "managed"],
+  ["safe-not-allowed", "Use device_open. SSH must not be used for screenshots.", "managed"],
+  [
+    "negation-comma",
+    "Use device_open. Do not use SSH for builds, use SSH for screenshots.",
+    "mixed",
+  ],
+  ["unless", "Use device_open unless it is slow; then use SSH to take screenshots.", "mixed"],
+  ["after-blocker", "Use device_open. If it fails, use SSH to capture screenshots.", "mixed"],
+  ["via-screenshot-plural", "Use device_open. Screenshots are taken using SSH.", "mixed"],
+  ["prefer-route", "Use device_open. Prefer SSH for screenshots.", "mixed"],
+  ["capture-on-host", "Use device_open. Capture screenshots on build-mac over SSH.", "mixed"],
+  ["ssh-remote-exec", "Use device_open. SSH build-mac and take a screenshot.", "mixed"],
+  [
+    "ssh-use-separate-clause",
+    "Use device_open. SSH into build-mac, then capture the screen.",
+    "mixed",
+  ],
+  ["host-alias-purpose", "Use device_open. Run ssh -p 22 build-mac for screenshots.", "mixed"],
+  ["negative-managed-only", "Do not use device_open. Only run the tests.", "neutral"],
+  ["list-only", "Use device_list for UI and screenshots.", "neutral"],
+  ["managed-only-aux", "Use device_open only for discovery. Take screenshots with SSH.", "mixed"],
+  [
+    "allow-not-just",
+    "Use device_open. Use SSH not just for builds but for screenshots too.",
+    "mixed",
+  ],
+  [
+    "avoid-inversion",
+    "Use device_open. Avoid limiting SSH to builds; use it for screenshots.",
+    "mixed",
+  ],
+  [
+    "copy-before-new",
+    "Use device_open. Copy saved screenshots over SSH and capture new screenshots there.",
+    "mixed",
+  ],
+  [
+    "safe-copy-build",
+    "Use device_open. Use SSH for builds and to copy saved screenshots back.",
+    "managed",
+  ],
+  ["safe-screenshot-output", "Use device_open. Use SSH for logs from screenshot tests.", "managed"],
+  [
+    "safe-aux-separated",
+    "Use device_open. Use SSH only for builds. Capture screenshots through the returned command.",
+    "managed",
+  ],
+  ["for-screen-first", "Use device_open. For the screen capture, SSH into build-mac.", "mixed"],
+  ["ssh-negative-safe", "Use device_open. Never take screenshots over SSH.", "managed"],
+  ["split-ui-verb", "Use device_open. SSH to build-mac and launch the app.", "mixed"],
+  ["safe-raw-word", "Use device_open. SSH for reading screenshot logs only.", "managed"],
+  ["do-not-forget", "Use device_open. Do not forget to use SSH for screenshots.", "mixed"],
+  ["ssh-screen-through-host", "Use device_open. Screenshots via ssh build-mac.", "mixed"],
+] as const)("R6 brief routing: %s", (_, text, route) => {
+  assert.equal(briefRoute(text), route);
+});
+
+it.each([
+  ["false-and", `false && ${r6Raw}`, false],
+  ["true-or", `true || ${r6Raw}`, false],
+  ["false-pipe", `false | ${r6Raw}`, true],
+  ["if-not-false", `if ! false; then ${r6Raw}; fi`, true],
+  ["if-not-true", `if ! true; then ${r6Raw}; fi`, false],
+  ["for-loop", `for x in one; do ${r6Raw}; done`, true],
+  ["while-false", `while false; do ${r6Raw}; done`, false],
+  ["redirect-expansion", `echo ok > "$(ssh build-mac ${r6Raw})"`, true],
+  ["backtick", `echo \`ssh build-mac ${r6Raw}\``, true],
+  [
+    "xcrun-sdk",
+    `ssh build-mac xcrun --sdk iphonesimulator simctl io PRIVATE screenshot /tmp/a.png`,
+    true,
+  ],
+  ["xcrun-run", `ssh build-mac xcrun -r simctl io PRIVATE screenshot /tmp/a.png`, true],
+  ["sh-default-stdin", `printf '%s\\n' '${r6Raw}' | ssh build-mac`, true],
+  ["bash-c-stdin", `printf '%s\\n' '${r6Raw}' | ssh build-mac 'bash -c cat'`, false],
+  [
+    "node-spawn",
+    `ssh build-mac 'node -' <<'JS'\nconst {spawnSync}=require('child_process'); spawnSync('xcrun', ['simctl','io','PRIVATE','screenshot','/tmp/a.png']);\nJS`,
+    true,
+  ],
+  [
+    "node-execFile",
+    `ssh build-mac 'node -' <<'JS'\nrequire('child_process').execFileSync('xcrun', ['simctl','io','PRIVATE','screenshot','/tmp/a.png']);\nJS`,
+    true,
+  ],
+  [
+    "python-data-shell-false",
+    `python3 - <<'PY'\nimport subprocess\nsubprocess.run('${r6Raw}')\nPY`,
+    false,
+  ],
+  [
+    "python-data-argv",
+    `python3 - <<'PY'\nimport subprocess\nsubprocess.run(['printf','%s','${r6Raw}'])\nPY`,
+    false,
+  ],
+  ["printf-comment", `printf '%s\\n' '# ${r6Raw}' | ssh build-mac sh`, false],
+  [
+    "python-triple-data",
+    `python3 - <<'PY'\ns = """subprocess.run(['xcrun','simctl','io','PRIVATE','screenshot','/tmp/a.png'])"""\nprint(s)\nPY`,
+    false,
+  ],
+  ["process-substitution", `cat <(ssh build-mac ${r6Raw})`, true],
+  ["ssh-no-stdin", `cat <<'EOF' | ssh build-mac sh\n${r6Raw}\nEOF`, true],
+  ["local-pipe-shell", `echo '${r6Raw}' | bash`, true],
+  ["command-data", `echo '${r6Raw}'`, false],
+  [
+    "absolute-xcrun",
+    `ssh build-mac /usr/bin/xcrun /usr/bin/simctl io PRIVATE screenshot /tmp/a.png`,
+    true,
+  ],
+  ["literal-help-text", `ssh build-mac 'agent-device type -- --help'`, true],
+] as const)("R6 static invocation: %s", (_, command, raw) => {
+  assert.equal(
+    gradeDevice(
+      { noRawUi: true },
+      {
+        calls: [{ step: 0, tool: "Bash", input: { command } }],
+      },
+    ).some((c) => !c.pass),
+    raw,
+  );
+});
+
+const r6Launcher = "/home/user/.t3/userdata/device/targets/t3-proof/agent-device";
+it.each([
+  ["false and", "false && LAUNCHER record start /tmp/raw.mp4; LAUNCHER record stop", false],
+  ["dead subshell", "false && (LAUNCHER record start /tmp/raw.mp4; LAUNCHER record stop)", false],
+  ["dead braces", "true || { LAUNCHER record start /tmp/raw.mp4; LAUNCHER record stop; }", false],
+  ["live subshell", "(LAUNCHER record start /tmp/raw.mp4; LAUNCHER record stop)", true],
+  [
+    "uncertain alias",
+    "if test -f /tmp/flag; then AD=LAUNCHER; fi; $AD record start /tmp/raw.mp4; $AD record stop",
+    false,
+  ],
+  [
+    "function keyword",
+    "function demo { LAUNCHER record start /tmp/raw.mp4; LAUNCHER record stop; }; echo done",
+    false,
+  ],
+  [
+    "called function",
+    "demo() { LAUNCHER record start /tmp/raw.mp4; LAUNCHER record stop; }; demo",
+    true,
+  ],
+  ["true or", "true || LAUNCHER record start /tmp/raw.mp4; LAUNCHER record stop", false],
+  [
+    "masked start",
+    "false && LAUNCHER record start /tmp/raw.mp4 || true; LAUNCHER record stop",
+    false,
+  ],
+  [
+    "uncalled shell",
+    "demo() { LAUNCHER record start /tmp/raw.mp4; LAUNCHER record stop; }; echo done",
+    false,
+  ],
+  [
+    "uncalled Python",
+    "python3 - <<'PY'\nimport subprocess\ndef demo():\n  subprocess.run(['LAUNCHER','record','start','/tmp/raw.mp4'])\n  subprocess.run(['LAUNCHER','record','stop'])\nprint('done')\nPY",
+    false,
+  ],
+  [
+    "exclusive arms",
+    "if test -f /tmp/flag; then LAUNCHER record start /tmp/raw.mp4; else LAUNCHER record stop; fi",
+    false,
+  ],
+  [
+    "unknown arm",
+    "if test -f /tmp/flag; then LAUNCHER record start /tmp/raw.mp4; LAUNCHER record stop; fi",
+    false,
+  ],
+  [
+    "unknown and then success",
+    "test -f /tmp/flag && LAUNCHER record start /tmp/raw.mp4; LAUNCHER record stop",
+    false,
+  ],
+  [
+    "known arm",
+    "if ! false; then LAUNCHER record start /tmp/raw.mp4; LAUNCHER record stop; fi",
+    true,
+  ],
+  ["straight line", "LAUNCHER record start /tmp/raw.mp4; LAUNCHER record stop", true],
+  [
+    "successful final and list",
+    "mkdir -p /tmp/demo && LAUNCHER record start /tmp/raw.mp4 && LAUNCHER record stop",
+    true,
+  ],
+  [
+    "Python argv",
+    "python3 - <<'PY'\nimport subprocess\nsubprocess.run(['LAUNCHER','record','start','/tmp/raw.mp4'])\nsubprocess.run(['LAUNCHER','record','stop'])\nPY",
+    true,
+  ],
+  [
+    "masked action result",
+    "LAUNCHER record start /tmp/raw.mp4 || true; LAUNCHER record stop",
+    false,
+  ],
+] as const)("R6 establishes recording execution: %s", (_, source, pass) => {
+  const calls = [
+    {
+      step: 0,
+      tool: "Bash",
+      failed: false,
+      input: { command: source.replaceAll("LAUNCHER", r6Launcher) },
+    },
+  ];
+  assert.equal(
+    gradeDevice(
+      { recording: "/tmp/demo/voice.mp4" },
+      {
+        calls,
+        launchers: [r6Launcher],
+        finalText: "Saved /tmp/demo/voice.mp4",
+        stopReason: "end_turn",
+      },
+    ).every((c) => c.pass),
+    pass,
+  );
+});
+
+it.each([
+  ["dead capture", "false && LAUNCHER screenshot /tmp/a.png", false],
+  ["uncalled capture", "shot() { LAUNCHER screenshot /tmp/a.png; }; echo done", false],
+  ["uncertain capture", "if test -f /tmp/flag; then LAUNCHER screenshot /tmp/a.png; fi", false],
+  ["known capture", "true && LAUNCHER screenshot /tmp/a.png", true],
+  ["live capture", "LAUNCHER screenshot /tmp/a.png", true],
+] as const)("R6 establishes managed capture execution: %s", (_, source, pass) => {
+  const target = {
+    hostId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    deviceId: "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB",
+  };
+  assert.equal(
+    gradeDevice(
+      { capture: target },
+      {
+        launchers: [r6Launcher],
+        calls: [
+          { step: 0, tool: "device_open", input: target, failed: false },
+          {
+            step: 1,
+            tool: "Bash",
+            input: { command: source.replaceAll("LAUNCHER", r6Launcher) },
+            failed: false,
+          },
+        ],
+      },
+    ).every((c) => c.pass),
+    pass,
+  );
+});
+
+it.each([
+  [
+    "ambiguous failed aggregate",
+    "LAUNCHER snapshot -i; LAUNCHER snapshot -i; LAUNCHER snapshot -i; false",
+    true,
+    1,
+  ],
+  [
+    "successful aggregate",
+    "LAUNCHER snapshot -i || true; LAUNCHER snapshot -i || true; LAUNCHER snapshot -i || true",
+    false,
+    0,
+  ],
+  [
+    "true and aggregate",
+    "true && LAUNCHER snapshot -i; true && LAUNCHER snapshot -i; true && LAUNCHER snapshot -i",
+    true,
+    1,
+  ],
+  ["literal loop aggregate", "for n in 1 2 3; do LAUNCHER snapshot -i; done", true, 1],
+  ["dead launcher", "false && LAUNCHER snapshot -i", true, 0],
+  ["single failed invocation", "true && LAUNCHER snapshot -i", true, 1],
+] as const)("R6 conservative failure attribution: %s", (_, source, failedCall, failures) => {
+  const calls = [
+    {
+      step: 0,
+      tool: "Bash",
+      failed: failedCall,
+      input: { command: source.replaceAll("LAUNCHER", r6Launcher) },
+    },
+  ];
+  for (const max of [0, 1, 2])
+    assert.equal(
+      gradeDevice({ maxFailedAttemptsPerTurn: max }, { calls }).every((c) => c.pass),
+      failures <= max,
+    );
+});
+
+it("R6 separates ORC device routing from unrelated thread links", () => {
+  const c = deviceCases().find((c) => c.id === "ORC-01")!;
+  const calls = [0, 1, 2].map((step) => ({
+    step,
+    tool: "t3_thread_launch",
+    input: { message: "Use device_open and its returned launcher for screenshots." },
+  }));
+  assert.isTrue(
+    gradeSample(c.expect, {
+      calls: [{ step: 0, tool: "orchestrator_capabilities", input: {} }, ...calls],
+      text: "Readbacks mismatched; jobs cancelled.",
+      stopReason: "end_turn",
+    }).every((c) => c.pass),
+  );
+  calls[2]!.input.message = "Use SSH to capture screenshots.";
+  assert.isFalse(
+    gradeSample(c.expect, {
+      calls: [{ step: 0, tool: "orchestrator_capabilities", input: {} }, ...calls],
+      text: "t3-thread://v1/example",
+      stopReason: "end_turn",
+    }).every((c) => c.pass),
+  );
+});
+
+it.each([
+  [
+    "Use device_open and the exact returned launcher with its pinned flags for managed screenshots. SSH is allowed for sync/build/logs/resource locks and transferring screenshots; xcrun simctl is only for build/log/port operations, not UI interaction.",
+    "managed",
+  ],
+  [
+    "Use device_open and the exact returned launcher. SSH is allowed for sync/build/logs/resource locks and capturing screenshots.",
+    "mixed",
+  ],
+] as const)("R6 preserves the retained safe transfer allowance: %s", (text, route) => {
+  assert.equal(briefRoute(text), route);
+});
+
+it.each([
+  [
+    "Use device_open and its returned launcher for screenshots. Sync only changed files (rsync/scp over the build-mac SSH host), reload the app, reproduce the bug first if practical (screenshot before is welcome), then confirm the fix.",
+    "managed",
+  ],
+  ["Use device_open. Run ssh -p 22 build-mac for screenshots.", "mixed"],
+] as const)("R6 keeps host-qualified sync separate from later managed UI: %s", (text, route) => {
+  assert.equal(briefRoute(text), route);
+});
+
+it.each([
+  [
+    "node argv data",
+    "node - <<'JS'\nrequire('child_process').spawnSync('printf', ['%s', 'xcrun simctl io PRIVATE screenshot /tmp/a.png']);\nJS",
+    false,
+  ],
+  [
+    "node execFile data",
+    "node - <<'JS'\nrequire('child_process').execFileSync('printf', ['%s', 'xcrun simctl io PRIVATE screenshot /tmp/a.png']);\nJS",
+    false,
+  ],
+  [
+    "Python explicit shell",
+    "python3 - <<'PY'\nimport subprocess\nsubprocess.run('xcrun simctl io PRIVATE screenshot /tmp/a.png', shell=True)\nPY",
+    true,
+  ],
+  [
+    "redirect data",
+    "echo ok > '$(ssh build-mac xcrun simctl io PRIVATE screenshot /tmp/a.png)'",
+    false,
+  ],
+  ["SDK help", "xcrun --sdk iphonesimulator simctl io PRIVATE screenshot --help", false],
+] as const)("R6 keeps interpreter argv and redirect operands as data: %s", (_, command, raw) => {
+  assert.equal(
+    gradeDevice({ noRawUi: true }, { calls: [{ step: 0, tool: "Bash", input: { command } }] }).some(
+      (c) => !c.pass,
+    ),
+    raw,
+  );
+});

@@ -513,6 +513,8 @@ it.each([
   "nohup pnpm metro --port 8095 > /tmp/metro.log 2>&1 &",
   "cat > /tmp/notes.md <<'EOF'\nxcrun simctl io PRIVATE screenshot /tmp/proof.png\nEOF",
   "ssh build-mac 'python3 -' <<'PY'\nimport subprocess\nsubprocess.run(['xcrun', 'simctl', 'install', 'PRIVATE', '/tmp/Acme.app'])\nPY",
+  "for s in AcmeApp AcmeWidget; do ssh build-mac xcodebuild -scheme $s build; done",
+  "while ! ssh build-mac test -f /tmp/ready; do sleep 1; done",
 ])("allows auxiliary shell work: %s", (command) => {
   const calls = [{ step: 0, tool: "Bash", input: { command } }];
   assert.isTrue(gradeDevice({ noRawUi: true }, { calls }).every((c) => c.pass));
@@ -538,6 +540,13 @@ it.each([
   "ssh build-mac 'python3 -' <<'PY'\nimport subprocess\nproc = subprocess.Popen(['xcrun', 'simctl', 'io', 'PRIVATE', 'recordVideo', '/tmp/raw.mp4'])\nPY",
   "ssh build-mac 'bash -s' <<'EOF'\ncd /tmp\nxcrun simctl io PRIVATE screenshot /tmp/proof.png\nEOF",
   `python3 -c "import subprocess; subprocess.run(['xcrun', 'simctl', 'openurl', 'PRIVATE', 'acme://settings'])"`,
+  // Loops, elif and `!` run the commands they introduce (council R6).
+  "for f in a b; do xcrun simctl io PRIVATE screenshot /tmp/$f.png; done",
+  "while true; do ssh build-mac xcrun simctl io PRIVATE screenshot /tmp/p.png; sleep 1; done",
+  "until ssh build-mac 'xcrun simctl io PRIVATE screenshot /tmp/p.png'; do sleep 1; done",
+  "! xcrun simctl io PRIVATE screenshot /tmp/proof.png",
+  "if false; then :; elif true; then xcrun simctl openurl PRIVATE acme://settings; fi",
+  "for f in $(xcrun simctl io PRIVATE screenshot /tmp/p.png); do echo $f; done",
 ])("rejects simulator UI shell mutations: %s", (command) => {
   const calls = [{ step: 0, tool: "Bash", input: { command } }];
   assert.isTrue(gradeDevice({ noRawUi: true }, { calls }).some((c) => !c.pass));

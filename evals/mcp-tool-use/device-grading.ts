@@ -303,8 +303,19 @@ export function shellInvocations(
       active = conditions.pop()?.parent ?? true;
       words.shift();
     }
+    if (words[0] === "elif") {
+      // Any elif branch may run, so inspect them all.
+      const condition = conditions.at(-1);
+      active = condition?.parent ?? true;
+      if (condition) condition.take = undefined;
+      words.shift();
+    }
+    // Loop keywords and `!` run the command they introduce; a `for` list only expands.
+    while (/^(?:while|until|do|done|!)$/.test(words[0] ?? "")) words.shift();
+    const loopList = /^(?:for|select)$/.test(words[0] ?? "");
     if (!active || !words.length) return;
     for (const word of rawWords) if (!bodies.has(word)) substitutions(word);
+    if (loopList) return;
     const body = words.map((word) => bodies.get(word)).find((value) => value !== undefined);
     if (body?.expand) substitutions(body.text, true);
     words = words.filter((word) => !bodies.has(word));

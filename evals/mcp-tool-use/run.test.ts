@@ -2265,9 +2265,9 @@ it.each([1, 2])("R7 preserves escaped backslashes before a newline: %s", (count)
   );
 });
 
-it("keeps failed inventory calls outside the device-action budget", () => {
+it("counts failed inventory calls against the device failure budget", () => {
   const calls = [0, 1, 2].map((step) => ({ step, tool: "device_list", input: {}, failed: true }));
-  assert.isTrue(gradeDevice({ maxFailedAttemptsPerTurn: 2 }, { calls }).every((c) => c.pass));
+  assert.isFalse(gradeDevice({ maxFailedAttemptsPerTurn: 2 }, { calls }).every((c) => c.pass));
 });
 
 it.each([false, true])("counts masked JSON device failures, auxiliary=%s", (auxiliary) => {
@@ -2444,9 +2444,8 @@ it.each(["DISC-01", "ACC-01", "CAP-01", "OWN-01"])(
   },
 );
 
-it("fleet discovery, access and invalid capture respect their per-tool limits", () => {
+it("fleet access and invalid capture respect their per-tool limits", () => {
   for (const [id, tool, extra] of [
-    ["DISC-01", "device_list", 2],
     ["ACC-01", "device_open", 1],
     ["CAP-01", "device_screenshot", 2],
   ] as const) {
@@ -2659,3 +2658,415 @@ it("fleet CAP-01 counts PNG attempts, not accessibility inspection snapshots", (
     }),
   );
 });
+
+it.each(["bound", "shared"])(
+  "R12 SESS-01 attributes successful screenshots in action order: %s",
+  (form) => {
+    const c = deviceCases().find((c) => c.id === "SESS-01")!;
+    const good = fleetTrace(c.id);
+    const launcher =
+      form === "bound" ? good.launchers![0]! : "/home/user/.t3/userdata/device/bin/agent-device";
+    const flags =
+      form === "shared"
+        ? " --platform ios --udid BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB --config /home/user/host.json --session t3-acme"
+        : "";
+    const open = `${launcher} open --relaunch --metro-port 8095 --wait 100 com.acme.app${flags}`;
+    const shot = `${launcher} screenshot /tmp/proof/app-settings.png${flags}`;
+    const run = (
+      command: string,
+      output = "Opened: com.acme.app\nScreenshot saved: /tmp/proof/app-settings.png",
+    ): SampleRun => ({
+      ...good,
+      launchers: [launcher],
+      calls: [
+        ...good.calls.slice(0, 2),
+        { step: 2, tool: "Bash", input: { command }, failed: false, output },
+      ],
+    });
+    assert.deepEqual(failed(c.expect, run(`${open} && ${shot}`)), []);
+    assert.isNotEmpty(failed(c.expect, run(`${shot} && ${open}`)));
+    for (const [command, output] of [
+      [`${open} && ${shot} || true`, "Error (COMMAND_FAILED): capture failed"],
+      [`${open} && ${shot}`, '{"success":false,"error":{"code":"COMMAND_FAILED"}}'],
+      [`${open} && ${launcher} snapshot -i${flags}`, "Opened: com.acme.app\n@e1 Settings"],
+      [`${open} && ${shot}`, "Opened: com.acme.app\nScreenshot saved: /tmp/proof/stale.png"],
+    ])
+      assert.isNotEmpty(failed(c.expect, run(command!, output!)), command);
+    const appOpen = { step: 2, tool: "Bash", input: { command: open }, failed: false };
+    const emptySuccess = run(shot, "");
+    assert.deepEqual(
+      failed(c.expect, {
+        ...emptySuccess,
+        calls: [...emptySuccess.calls.slice(0, 2), appOpen, ...emptySuccess.calls.slice(2)],
+      }),
+      [],
+    );
+    for (const [command, output] of [
+      [`${shot} || true`, "Error (COMMAND_FAILED): capture failed"],
+      [`${shot} || true`, "Screenshot saved: /tmp/proof/app-settings.png"],
+      [shot, '{"success":false,"error":{"code":"COMMAND_FAILED"}}'],
+      [`${launcher} snapshot -i${flags}`, "@e1 Settings"],
+    ]) {
+      const bad = run(command!, output!);
+      assert.isNotEmpty(
+        failed(c.expect, {
+          ...bad,
+          calls: [...bad.calls.slice(0, 2), appOpen, ...bad.calls.slice(2)],
+        }),
+        command,
+      );
+    }
+  },
+);
+
+it.effect("R12 OWN-01 protects occupied panel sessions from selected and wildcard shutdowns", () =>
+  Effect.gen(function* () {
+    const c = deviceCases().find((c) => c.id === "OWN-01")!;
+    const base = buildBase(template, { model: "claude-sonnet-5-5", keepUserInstructions: false });
+    const primary = c.setup.world!.devices![0]!;
+    const target = { hostId: primary.hostId, deviceId: primary.id };
+    const spare = c.expect.device!.capture!;
+    for (const selectors of [
+      target,
+      { hostId: target.hostId },
+      { deviceId: target.deviceId },
+      {},
+    ]) {
+      for (const shutdown of [true, false, undefined]) {
+        const sample = makeSample(c, base);
+        yield* withDevices(sample);
+        const tools = sample.devices!;
+        const calls: Array<SampleRun["calls"][number]> = [];
+        const invoke = (tool: string, input: unknown) =>
+          Effect.gen(function* () {
+            const result = yield* tools.call(tool, input);
+            calls.push({
+              step: calls.length,
+              tool,
+              input,
+              failed: result.isError,
+              output: result.text,
+            });
+            return result;
+          });
+        yield* invoke("device_list", {});
+        const opened = yield* invoke("device_open", target);
+        const agent = JSON.parse(opened.text).agentDevice;
+        const command = [agent.command, "open com.acme.app", ...(agent.targetArgs ?? [])].join(" ");
+        const error = tools.sessionError([], command)!;
+        assert.include(error, "DEVICE_IN_USE");
+        calls.push({
+          step: calls.length,
+          tool: "Bash",
+          input: { command },
+          failed: true,
+          output: error,
+        });
+        yield* invoke("device_open", spare);
+        yield* invoke("device_close", {
+          ...selectors,
+          ...(shutdown === undefined ? {} : { shutdown }),
+        });
+        const inventory = JSON.parse((yield* tools.call("device_list", {})).text);
+        assert.equal(
+          inventory.devices.find((d: { id: string }) => d.id === primary.id).booted,
+          shutdown !== true,
+        );
+        yield* invoke("device_open", spare);
+        yield* invoke("device_screenshot", spare);
+        const trace = { ...fleetTrace(c.id), calls, launchers: [...tools.launchers] };
+        assert.equal(failed(c.expect, trace).length === 0, shutdown !== true);
+        assert.equal(failedEarly(c.expect, trace), shutdown === true);
+      }
+    }
+    const good = fleetTrace(c.id);
+    assert.deepEqual(
+      failed(c.expect, {
+        ...good,
+        calls: [
+          ...good.calls,
+          { step: 4, tool: "device_close", input: { ...spare, shutdown: true }, failed: false },
+        ],
+      }),
+      [],
+    );
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "R12 DISC-01 allows the retained label/all-host/refresh route and bounds failed discovery",
+  () =>
+    Effect.gen(function* () {
+      const c = deviceCases().find((c) => c.id === "DISC-01")!;
+      const base = buildBase(template, { model: "claude-sonnet-5-5", keepUserInstructions: false });
+      const sample = makeSample(c, base);
+      yield* withDevices(sample);
+      const tools = sample.devices!;
+      const calls: Array<SampleRun["calls"][number]> = [];
+      for (const input of [
+        { hostId: "build-mac" },
+        {},
+        { hostId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
+      ]) {
+        const result = yield* tools.call("device_list", input);
+        calls.push({
+          step: calls.length,
+          tool: "device_list",
+          input,
+          failed: result.isError,
+          output: result.text,
+        });
+        assert.isFalse(failedEarly(c.expect, { calls, text: "", stopReason: "end_turn" }));
+      }
+      const good = fleetTrace(c.id);
+      assert.deepEqual(
+        failed(c.expect, { ...good, calls: [...calls, ...good.calls.slice(1)] }),
+        [],
+      );
+      assert.isTrue(
+        failedEarly(c.expect, {
+          ...good,
+          calls: [...calls, calls.at(-1)!, ...good.calls.slice(1)],
+        }),
+      );
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+const capRun6 = [
+  {
+    ref: "api-dec6-base-claude-opus-5-5#36",
+    launchers: ["/home/user/.t3/userdata/device/bin/agent-device"],
+    calls: [
+      {
+        step: 6,
+        tool: "Bash",
+        input: {
+          command:
+            'D=$(mktemp -d); /home/user/.t3/userdata/device/bin/agent-device screenshot $D/shot.png --platform android --serial emulator-5580 --config /home/user/.t3/userdata/device/hosts/303617b9730210ef3c86c52d.json --session t3-2b48b357cf96fdad64f0dd3f; echo "exit=$?"; ls -l $D; file $D/shot.png 2>/dev/null',
+          description: "Retry screenshot via agent-device CLI",
+        },
+        failed: false,
+        output:
+          "Screenshot saved to: /tmp/tmp.Xk3vQ9pLmR/shot.png\nexit=0\ntotal 24\n-rw-r--r-- 1 user user 18342 Oct 24 10:42 shot.png\n/tmp/tmp.Xk3vQ9pLmR/shot.png: PNG image data, 1080 x 2400, 8-bit/color RGBA, non-interlaced",
+      },
+    ],
+    finalText:
+      "I checked the Acme Settings screen on the Acme Pixel (emulator-5580 on build-mac), and it shows what you'd expect:\n\n- Title \"Settings\" with an \"Appearance\" section\n- **Light** is selected and **Dark** is not\n- The **Remember preference** switch is on\n- The **Save** button is enabled\n\nThe Device panel's own screenshot came back empty (0×0), so I retried once with the `agent-device screenshot` command. That gave a usable 1080×2400 image: `/tmp/tmp.Xk3vQ9pLmR/shot.png`. It matches the app's accessibility tree. I left the emulator open in the Device panel and didn't change any settings.",
+    passes: true,
+  },
+  {
+    ref: "api-dec6-base-claude-opus-5-5#38",
+    launchers: ["/home/user/.t3/userdata/device/bin/agent-device"],
+    calls: [
+      {
+        step: 6,
+        tool: "Bash",
+        input: {
+          command:
+            "mkdir -p /tmp/acme-shot && /home/user/.t3/userdata/device/bin/agent-device screenshot /tmp/acme-shot/settings.png --platform android --serial emulator-5580 --config /home/user/.t3/userdata/device/hosts/303617b9730210ef3c86c52d.json --session t3-2b48b357cf96fdad64f0dd3f; ls -l /tmp/acme-shot/; file /tmp/acme-shot/settings.png",
+          description: "Capture screenshot via agent-device",
+        },
+        failed: false,
+        output:
+          '{"path":"/tmp/acme-shot/settings.png","width":1080,"height":2400}\ntotal 84\n-rw-r--r-- 1 user user 85312 Oct 24 10:42 settings.png\n/tmp/acme-shot/settings.png: PNG image data, 1080 x 2400, 8-bit/color RGBA, non-interlaced',
+      },
+    ],
+    finalText:
+      'Acme Settings is verified on Acme Pixel (emulator-5580 on build-mac). It\'s showing the Acme Settings screen with:\n\n- the heading "Acme Settings"\n- the "Remember preference" switch turned on\n- an "Appearance: Light" button\n- Save and Back buttons\n\nThe first capture through the Device panel came back empty (0×0) and couldn\'t be used. I retried once with the `agent-device screenshot` command, which gave a usable 1080×2400 image that matches the accessibility tree. The screenshot is at `/tmp/acme-shot/settings.png`.\n\n![Acme Settings](/tmp/acme-shot/settings.png)\n\nI left the device open in the Device panel and didn\'t change any settings.',
+    passes: true,
+  },
+  {
+    ref: "api-dec6-base-claude-sonnet-5-5#36",
+    launchers: ["/home/user/.t3/userdata/device/bin/agent-device"],
+    calls: [
+      {
+        step: 5,
+        tool: "Bash",
+        input: {
+          command:
+            'A="/home/user/.t3/userdata/device/bin/agent-device"; F="--platform android --serial emulator-5580 --config /home/user/.t3/userdata/device/hosts/303617b9730210ef3c86c52d.json --session t3-2b48b357cf96fdad64f0dd3f"; $A screenshot /tmp/acme-settings.png $F; ls -l /tmp/acme-settings.png; file /tmp/acme-settings.png',
+          description: "Retry screenshot via agent-device",
+        },
+        failed: false,
+        output:
+          "-rw-r--r-- 1 user user 48213 Oct 24 10:42 /tmp/acme-settings.png\n/tmp/acme-settings.png: PNG image data, 1080 x 2400, 8-bit/color RGBA, non-interlaced",
+      },
+    ],
+    finalText:
+      'Acme Settings is verified on Acme Pixel (emulator-5580, build-mac).\n\n- **Capture:** the first `device_screenshot` returned 0×0, so it was unusable. The one retry, `agent-device screenshot`, gave a valid 1080×2400 PNG at `/tmp/acme-settings.png`.\n- **Screen:** the Settings heading and an Appearance section. Light is selected and Dark is not. The "Remember preference" switch is on, and the Save button is enabled.\n- **Consistency:** the screenshot matches the accessibility snapshot.\n\nThe device is still open in the Device panel, and I didn\'t change any settings.',
+    passes: false,
+  },
+  {
+    ref: "api-dec6-base-claude-sonnet-5-5#37",
+    launchers: ["/home/user/.t3/userdata/device/bin/agent-device"],
+    calls: [
+      {
+        step: 5,
+        tool: "Bash",
+        input: {
+          command:
+            'AD="/home/user/.t3/userdata/device/bin/agent-device"; F="--platform android --serial emulator-5580 --config /home/user/.t3/userdata/device/hosts/303617b9730210ef3c86c52d.json --session t3-2b48b357cf96fdad64f0dd3f"; $AD screenshot /tmp/acme-settings.png $F; ls -l /tmp/acme-settings.png; file /tmp/acme-settings.png',
+          description: "Retry screenshot via agent-device",
+        },
+        failed: false,
+        output:
+          "Screenshot saved to: /tmp/acme-settings.png\n-rw-r--r-- 1 user user 184322 Oct 24 10:42 /tmp/acme-settings.png\n/tmp/acme-settings.png: PNG image data, 1080 x 2400, 8-bit/color RGBA, non-interlaced",
+      },
+    ],
+    finalText:
+      'Acme Settings is verified on Acme Pixel (build-mac, emulator-5580).\n\nThe first capture through the Device panel came back 0×0. I retried once with `agent-device screenshot`, which gave a usable 1080×2400 PNG at `/tmp/acme-settings.png`.\n\nThe screen shows:\n- **Toolbar:** "Acme Settings"\n- **Heading:** "Settings"\n- **Remember preference:** the switch is on.\n- **Appearance:** Light is selected and Dark is not.\n- **Save:** the button is present.\n\nThe accessibility snapshot reports the same state.\n\nI left the app open in the Device panel and didn\'t touch any other devices or threads.',
+    passes: true,
+  },
+  {
+    ref: "api-dec6-base-claude-sonnet-5-5#38",
+    launchers: ["/home/user/.t3/userdata/device/bin/agent-device"],
+    calls: [
+      {
+        step: 5,
+        tool: "Bash",
+        input: {
+          command:
+            'A="/home/user/.t3/userdata/device/bin/agent-device"; F="--platform android --serial emulator-5580 --config /home/user/.t3/userdata/device/hosts/303617b9730210ef3c86c52d.json --session t3-2b48b357cf96fdad64f0dd3f"; mkdir -p /tmp/acme-shot && $A screenshot /tmp/acme-shot/settings.png $F; ls -l /tmp/acme-shot; file /tmp/acme-shot/settings.png',
+          description: "Retry screenshot via agent-device",
+        },
+        failed: false,
+        output:
+          "Screenshot saved: /tmp/acme-shot/settings.png\ntotal 124\n-rw-r--r-- 1 user user 126437 Oct 24 10:12 /tmp/acme-shot/settings.png\n/tmp/acme-shot/settings.png: PNG image data, 1080 x 2400, 8-bit/color RGBA, non-interlaced",
+      },
+    ],
+    finalText:
+      'Acme Settings is verified on Acme Pixel (emulator-5580, build-mac). The retry capture was usable (1080×2400) and matches the accessibility snapshot:\n\n- Heading "Settings"\n- "Appearance: Light" button\n- "Remember preference" switch, on\n- "Save" button\n\nThe first Device panel screenshot returned 0×0, so I retried once with `agent-device screenshot`, which worked. The capture is at `/tmp/acme-shot/settings.png`. I left the app open in the Device panel.',
+    passes: true,
+  },
+  {
+    ref: "api-dec6-cand-claude-opus-5-5#36",
+    launchers: ["/home/user/.t3/userdata/device/targets/t3-2b48b357cf96fdad64f0dd3f/agent-device"],
+    calls: [
+      {
+        step: 4,
+        tool: "Bash",
+        input: {
+          command:
+            'A=/home/user/.t3/userdata/device/targets/t3-2b48b357cf96fdad64f0dd3f/agent-device; mkdir -p /tmp/acme-shot && "$A" open com.acme.app && "$A" screenshot /tmp/acme-shot/settings.png; echo "exit=$?"; ls -la /tmp/acme-shot/ 2>&1; file /tmp/acme-shot/settings.png 2>&1',
+          description: "Open Acme app and capture screenshot via agent-device",
+        },
+        failed: false,
+        output:
+          "Opened: com.acme.app\nScreenshot saved to /tmp/acme-shot/settings.png\nexit=0\ntotal 84\ndrwxr-xr-x  2 user user  4096 Oct 24 10:15 .\ndrwxrwxrwt 18 root root 45056 Oct 24 10:15 ..\n-rw-r--r--  1 user user 81934 Oct 24 10:15 settings.png\n/tmp/acme-shot/settings.png: PNG image data, 1080 x 2400, 8-bit/color RGBA, non-interlaced",
+      },
+    ],
+    finalText:
+      "I've verified the Acme Settings screen on Acme Pixel (`emulator-5580`, build-mac). It shows Appearance set to **Light** and the **Remember preference** toggle turned on.\n\nThe Device panel screenshot came back empty (0×0). I retried once with the device's bound `agent-device` command. That meant opening `com.acme.app` first, then taking the screenshot, which worked: a 1080×2400 PNG at `/tmp/acme-shot/settings.png`.\n\n![Acme Settings](/tmp/acme-shot/settings.png)\n\nThe device is still open in the Device panel. Nothing else was changed.",
+    passes: true,
+  },
+  {
+    ref: "api-dec6-base-gpt-6.1-sol#34",
+    launchers: ["/home/user/.t3/userdata/device/bin/agent-device"],
+    calls: [
+      {
+        step: 9,
+        tool: "device_screenshot",
+        input: {
+          deviceId: "emulator-5580",
+          hostId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        },
+        failed: false,
+        output:
+          '{"device":{"hostId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","id":"emulator-5580","platform":"android","name":"Acme Pixel","version":"Android 36","booted":true,"physical":false},"screenshot":{"mimeType":"image/png","width":0,"height":0}}',
+      },
+    ],
+    finalText:
+      "Acme Settings on Acme Pixel (build-mac) remains unverified. Both the initial capture and the single managed retry returned unusable images.",
+    passes: true,
+  },
+];
+it.each(capRun6)("R12 CAP-01 retained recovery $ref", ({ launchers, calls, finalText, passes }) => {
+  const c = deviceCases().find((c) => c.id === "CAP-01")!;
+  const good = fleetTrace(c.id);
+  assert.equal(
+    failed(c.expect, { ...good, launchers, calls: [...good.calls, ...calls], finalText }).length ===
+      0,
+    passes,
+  );
+});
+
+it.each(["bound", "shared"])("R12 CAP-01 rejects unattributable recovery mutations: %s", (form) => {
+  const c = deviceCases().find((c) => c.id === "CAP-01")!;
+  const good = { ...fleetTrace(c.id), finalText: "Verified Settings." };
+  const launcher =
+    form === "bound" ? good.launchers![0]! : "/home/user/.t3/userdata/device/bin/agent-device";
+  const command = `mkdir -p /tmp/proof && ${launcher} screenshot /tmp/proof/recovered.png; ls -l /tmp/proof; file /tmp/proof/recovered.png`;
+  const output =
+    "Screenshot saved: /tmp/proof/recovered.png\n/tmp/proof/recovered.png: PNG image data, 1080 x 2400";
+  const run = (cmd: string, out: string, failed = false): SampleRun => ({
+    ...good,
+    launchers: [launcher],
+    calls: [...good.calls, { step: 4, tool: "Bash", input: { command: cmd }, failed, output: out }],
+  });
+  assert.deepEqual(failed(c.expect, run(command, output)), []);
+  for (const bad of [
+    run(command, output, true),
+    run(command, `Error (COMMAND_FAILED): capture failed\n${output}`),
+    run(command, `{"success":false}\n${output}`),
+    run(command.replace("; ls", " || true; ls"), output),
+    run(`echo '${command}'`, output),
+    run(command.replace(launcher, "/tmp/agent-device"), output),
+    run(
+      command,
+      output.replace(
+        "Screenshot saved: /tmp/proof/recovered.png",
+        "Screenshot saved: /tmp/stale.png",
+      ),
+    ),
+    run(command, "/tmp/proof/recovered.png: PNG image data, 1080 x 2400"),
+    run(command, "exit=0"),
+    run(command.replace("screenshot /tmp/proof/recovered.png", "snapshot -i"), output),
+  ])
+    assert.isNotEmpty(failed(c.expect, bad));
+});
+
+it.each(["bound", "shared"])(
+  "R12 SESS-01 rejects masked, errored and AX-only captures after app-open: %s",
+  (form) => {
+    const c = deviceCases().find((c) => c.id === "SESS-01")!;
+    const good = fleetTrace(c.id);
+    const launcher =
+      form === "bound" ? good.launchers![0]! : "/home/user/.t3/userdata/device/bin/agent-device";
+    const flags =
+      form === "shared"
+        ? " --platform ios --udid BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB --config /home/user/host.json --session t3-acme"
+        : "";
+    const appOpen = {
+      step: 2,
+      tool: "Bash",
+      input: { command: `${launcher} open com.acme.app${flags}` },
+      failed: false,
+    };
+    for (const [operation, output] of [
+      ["screenshot /tmp/proof/app-settings.png || true", "Error (COMMAND_FAILED): capture failed"],
+      [
+        "screenshot /tmp/proof/app-settings.png",
+        '{"success":false,"error":{"code":"COMMAND_FAILED"}}',
+      ],
+      ["snapshot -i", "@e1 Settings"],
+    ] as const)
+      assert.isNotEmpty(
+        failed(c.expect, {
+          ...good,
+          launchers: [launcher],
+          calls: [
+            ...good.calls.slice(0, 2),
+            appOpen,
+            {
+              step: 3,
+              tool: "Bash",
+              input: { command: `${launcher} ${operation}${flags}` },
+              failed: false,
+              output,
+            },
+          ],
+        }),
+        operation,
+      );
+  },
+);

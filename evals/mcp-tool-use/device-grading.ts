@@ -12,6 +12,9 @@ export const DeviceExpect = Schema.Struct({
       app: Schema.optional(Schema.String),
     }),
   ),
+  noShutdown: Schema.optional(
+    Schema.Array(Schema.Struct({ hostId: Schema.String, deviceId: Schema.String })),
+  ),
   report: Schema.optional(Schema.Array(Schema.String)),
   reportOrCapture: Schema.optional(Schema.Boolean),
   maxFailedAttemptsPerTurn: Schema.optional(Schema.Number),
@@ -48,13 +51,7 @@ const inputTarget = (call: DeviceRun["calls"][number]) => ({
   hostId: inputString(call.input, "hostId") || "local",
   deviceId: inputString(call.input, "deviceId"),
 });
-const screenshotTarget = (call: DeviceRun["calls"][number], previous: DeviceRun["calls"]) => {
-  const result = resultTarget(call);
-  if (result) return result;
-  if (call.failed && /open in this thread/.test(call.output ?? "")) return undefined;
-  const host = inputString(call.input, "hostId"),
-    id = inputString(call.input, "deviceId");
-  if (host && id) return inputTarget(call);
+const openTargets = (previous: DeviceRun["calls"]) => {
   const sessions = new Map<string, ReturnType<typeof inputTarget>>();
   for (const prior of previous) {
     if (prior.failed !== false) continue;
@@ -71,7 +68,16 @@ const screenshotTarget = (call: DeviceRun["calls"][number], previous: DeviceRun[
           sessions.delete(key);
     }
   }
-  const matches = [...sessions.values()].filter(
+  return [...sessions.values()];
+};
+const screenshotTarget = (call: DeviceRun["calls"][number], previous: DeviceRun["calls"]) => {
+  const result = resultTarget(call);
+  if (result) return result;
+  if (call.failed && /open in this thread/.test(call.output ?? "")) return undefined;
+  const host = inputString(call.input, "hostId"),
+    id = inputString(call.input, "deviceId");
+  if (host && id) return inputTarget(call);
+  const matches = openTargets(previous).filter(
     (t) => (!host || t.hostId === host) && (!id || t.deviceId === id),
   );
   return id ? matches.at(-1) : matches.length === 1 ? matches[0] : undefined;
@@ -176,7 +182,7 @@ const deviceArgs = (words: ReadonlyArray<string>) => {
     if (word === "--") return [...args, ...words.slice(i + 1)];
     if (!word.startsWith("-")) args.push(word);
     else if (
-      /^--(?:platform|udid|serial|device|target|level|config|remote-config|session|state-dir|scope|timeout|timeout-ms|out|quality)$/.test(
+      /^--(?:platform|udid|serial|device|target|level|config|remote-config|session|state-dir|scope|timeout|timeout-ms|wait|metro-port|out|quality)$/.test(
         word,
       )
     )
@@ -803,36 +809,84 @@ export function gradeDevice(expect: typeof DeviceExpect.Type | undefined, run: D
         ] as const,
     );
   const allActions = shell.flatMap(([, actions]) => actions);
-  const recovered =
-    expect.reportOrCapture &&
-    (run.calls.some((call) => {
-      if (call.tool !== "device_screenshot" || call.failed !== false) return false;
+  const usableImage = (call: DeviceRun["calls"][number]) => {
+    if (call.failed !== false) return false;
+    try {
+      const image: unknown = JSON.parse(call.output ?? "").screenshot;
+      return (
+        record(image) &&
+        typeof image.width === "number" &&
+        image.width > 0 &&
+        typeof image.height === "number" &&
+        image.height > 0
+      );
+    } catch {
+      return false;
+    }
+  };
+  const successfulScreenshots = ([call, actions]: (typeof shell)[number]) => {
+    const captures = actions.filter((a) => a.managed && a.bound && a.args[0] === "screenshot");
+    if (
+      call.failed !== false ||
+      AGENT_DEVICE_ERROR.test(call.output ?? "") ||
+      captures.length !== 1 ||
+      /"(?:width|height)"\s*:\s*0\b/.test(call.output ?? "")
+    )
+      return [];
+    const paths = (call.output ?? "").split("\n").flatMap((line) => {
+      const saved = line.match(/^Screenshot saved(?: to)?(?::)?\s+(.+)$/i)?.[1];
+      if (saved) return [saved];
       try {
-        const image: unknown = JSON.parse(call.output ?? "").screenshot;
-        return (
+        const image: unknown = JSON.parse(line);
+        if (
           record(image) &&
+          typeof image.path === "string" &&
           typeof image.width === "number" &&
           image.width > 0 &&
           typeof image.height === "number" &&
           image.height > 0
-        );
-      } catch {
-        return false;
-      }
-    }) ||
-      shell.some(
-        ([call, actions]) =>
-          call.failed === false &&
-          !AGENT_DEVICE_ERROR.test(call.output ?? "") &&
-          actions.some(
-            (action) =>
-              action.executed &&
-              action.unmasked &&
-              !action.sequenced &&
-              action.bound &&
-              action.args[0] === "screenshot",
+        )
+          return [image.path];
+      } catch {}
+      return [];
+    });
+    return captures.filter(
+      (a) =>
+        a.unmasked &&
+        ((paths.length === 0 && a.executed && !a.sequenced) ||
+          paths.some(
+            (path) =>
+              path === a.args[1] ||
+              (a.args[1]?.startsWith("$/") && path.endsWith(a.args[1].slice(1))),
+          )),
+    );
+  };
+  const recovered =
+    expect.reportOrCapture &&
+    (run.calls.some((call) => call.tool === "device_screenshot" && usableImage(call)) ||
+      shell.some((entry) => successfulScreenshots(entry).length > 0));
+  if (expect.noShutdown)
+    add(
+      "callsMustNot shutdown occupied device",
+      !run.calls.some(
+        (call, index) =>
+          call.tool === "device_close" &&
+          record(call.input) &&
+          call.input.shutdown === true &&
+          openTargets(run.calls.slice(0, index)).some(
+            (target) =>
+              expect.noShutdown!.some(
+                (protectedTarget) =>
+                  target.hostId === protectedTarget.hostId &&
+                  target.deviceId === protectedTarget.deviceId,
+              ) &&
+              (!inputString(call.input, "hostId") ||
+                inputString(call.input, "hostId") === target.hostId) &&
+              (!inputString(call.input, "deviceId") ||
+                inputString(call.input, "deviceId") === target.deviceId),
           ),
-      ));
+      ),
+    );
   for (const pattern of expect.report ?? [])
     add(
       `device final report /${pattern}/`,
@@ -862,34 +916,39 @@ export function gradeDevice(expect: typeof DeviceExpect.Type | undefined, run: D
         opened &&
         appReady &&
         call.tool === "device_screenshot" &&
-        matches(screenshotTarget(call, run.calls.slice(0, index)))
+        matches(screenshotTarget(call, run.calls.slice(0, index))) &&
+        (!target.app || usableImage(call))
       )
         captured = true;
-      const actions = (shell.find(([source]) => source === call)?.[1] ?? []).filter(
-        (action) => action.executed && action.managed && action.bound,
-      );
-      for (const { args, words } of actions)
-        if (
-          opened &&
-          (!target.app || (call.failed === false && appSessions.has(words[0]!))) &&
-          (["screenshot", "snapshot"].includes(args[0] ?? "") ||
-            (args[0] === "record" && args[1] === "start"))
-        )
-          captured = true;
-      // Only a separate successful app-open grants app evidence; the latest open/close wins.
+      const entry = shell.find(([source]) => source === call);
+      const actions = (entry?.[1] ?? []).filter((action) => action.managed && action.bound);
+      const screenshots = entry ? successfulScreenshots(entry) : [];
       for (const action of actions) {
         const { args, words } = action;
-        if (!target.app || !["open", "close"].includes(args[0] ?? "")) continue;
-        appSessions.delete(words[0]!);
+        if (target.app && ["open", "close"].includes(args[0] ?? "")) {
+          appSessions.delete(words[0]!);
+          if (
+            args[0] === "open" &&
+            args[1] === target.app &&
+            call.failed === false &&
+            action.executed &&
+            action.unmasked &&
+            !AGENT_DEVICE_ERROR.test(call.output ?? "") &&
+            (!action.sequenced ||
+              (actions.filter((a) => a.args[0] === "open").length === 1 &&
+                /^Opened:/m.test(call.output ?? "")))
+          )
+            appSessions.add(words[0]!);
+        }
         if (
-          args[0] === "open" &&
-          args[1] === target.app &&
-          call.failed === false &&
-          action.unmasked &&
-          !action.sequenced &&
-          !AGENT_DEVICE_ERROR.test(call.output ?? "")
+          opened &&
+          (target.app
+            ? appSessions.has(words[0]!) && screenshots.includes(action)
+            : action.executed &&
+              (["screenshot", "snapshot"].includes(args[0] ?? "") ||
+                (args[0] === "record" && args[1] === "start")))
         )
-          appSessions.add(words[0]!);
+          captured = true;
       }
     }
     add("device successful open and capture attempt", captured);
@@ -932,11 +991,23 @@ export function gradeDevice(expect: typeof DeviceExpect.Type | undefined, run: D
       const device = actions.filter((action) => action.managed || action.raw).length;
       // agent-device prints one error per failed command, even when a later command succeeds.
       const errors = (call.output ?? "").match(new RegExp(AGENT_DEVICE_ERROR, "g"))?.length ?? 0;
-      const attempts = /^device_(?:open|screenshot|close)$/.test(call.tool)
-        ? Number(!!call.failed)
-        : call.failed && device
-          ? Math.max(1, Math.min(errors, device))
-          : Math.min(errors, device);
+      let discoveryFailed = false;
+      if (call.tool === "device_list") {
+        try {
+          const statuses: unknown = JSON.parse(call.output ?? "").hostStatuses;
+          discoveryFailed =
+            record(statuses) &&
+            Object.values(statuses).some((s) => record(s) && s.status === "failed");
+        } catch {}
+      }
+      const attempts =
+        call.tool === "device_list"
+          ? Number(!!call.failed || discoveryFailed)
+          : /^device_(?:open|screenshot|close)$/.test(call.tool)
+            ? Number(!!call.failed)
+            : call.failed && device
+              ? Math.max(1, Math.min(errors, device))
+              : Math.min(errors, device);
       const turn = call.turn ?? 0;
       failedByTurn.set(turn, (failedByTurn.get(turn) ?? 0) + attempts);
     }

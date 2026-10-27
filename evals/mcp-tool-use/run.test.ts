@@ -540,14 +540,14 @@ it.each([
   "ssh build-mac 'python3 -' <<'PY'\nimport subprocess\nproc = subprocess.Popen(['xcrun', 'simctl', 'io', 'PRIVATE', 'recordVideo', '/tmp/raw.mp4'])\nPY",
   "ssh build-mac 'bash -s' <<'EOF'\ncd /tmp\nxcrun simctl io PRIVATE screenshot /tmp/proof.png\nEOF",
   `python3 -c "import subprocess; subprocess.run(['xcrun', 'simctl', 'openurl', 'PRIVATE', 'acme://settings'])"`,
-  // Loops, elif and `!` run the commands they introduce (council R6).
+  // Loops, elif and `!` run the commands they introduce.
   "for f in a b; do xcrun simctl io PRIVATE screenshot /tmp/$f.png; done",
   "while true; do ssh build-mac xcrun simctl io PRIVATE screenshot /tmp/p.png; sleep 1; done",
   "until ssh build-mac 'xcrun simctl io PRIVATE screenshot /tmp/p.png'; do sleep 1; done",
   "! xcrun simctl io PRIVATE screenshot /tmp/proof.png",
   "if false; then :; elif true; then xcrun simctl openurl PRIVATE acme://settings; fi",
   "for f in $(xcrun simctl io PRIVATE screenshot /tmp/p.png); do echo $f; done",
-  // Review feedback on #25850: an uncertain short-circuit, and line continuations.
+  // An uncertain short-circuit, and line continuations.
   "test -f /tmp/flag && true || xcrun simctl io PRIVATE screenshot /tmp/a.png",
   "ssh build-mac xcrun simctl io PRIVATE \\\n  screenshot /tmp/a.png",
   'ssh build-mac "xcrun simctl io PRIVATE \\\n  screenshot /tmp/a.png"',

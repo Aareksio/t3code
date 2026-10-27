@@ -275,7 +275,7 @@ function scriptInvocations(
       i = end < 0 ? script.length : end;
       continue;
     }
-    if (char === "'" || char === '\"' || char === "`") {
+    if (char === "'" || char === '"' || char === "`") {
       const quote = python && script.slice(i, i + 3) === char.repeat(3) ? char.repeat(3) : char;
       i += quote.length;
       while (i < script.length && script.slice(i, i + quote.length) !== quote) {

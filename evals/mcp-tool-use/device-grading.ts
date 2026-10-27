@@ -799,7 +799,8 @@ export function gradeDevice(expect: typeof DeviceExpect.Type | undefined, run: D
       const actions = shell.find((entry) => entry.call === call)?.actions ?? [];
       const attempts = call.tool.startsWith("device_")
         ? 1
-        : Number(actions.some((action) => action.managed));
+        : // A failed raw attempt, such as agent-device over ssh, is still a failed device attempt.
+          Number(actions.some((action) => action.managed || action.raw));
       const turn = call.turn ?? 0;
       failedByTurn.set(turn, (failedByTurn.get(turn) ?? 0) + attempts);
     }

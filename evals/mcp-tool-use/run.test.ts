@@ -1332,6 +1332,17 @@ it.each([
   },
 );
 
+it("charges failed raw device attempts, such as agent-device over ssh, to the failure budget", () => {
+  const calls = [0, 1, 2].map((step) => ({
+    step,
+    tool: "Bash",
+    failed: true,
+    input: { command: "ssh build-mac agent-device snapshot -i" },
+  }));
+  const checks = gradeDevice({ maxFailedAttemptsPerTurn: 2 }, { calls });
+  assert.isFalse(checks.find((c) => c.check.startsWith("maxCalls device"))?.pass);
+});
+
 it("leaves errored samples out of pass rates and lists them in the summary", () => {
   const usage = { input: 10, output: 0, cacheWrite: 0, cacheRead: 0 };
   const row = (id: string, pass: boolean, error?: string) => ({

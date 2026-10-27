@@ -1403,6 +1403,16 @@ it.each([
 
 it.each([
   [
+    "an if whose condition list fails",
+    "if true && false; then LAUNCHER record start /tmp/demo/voice.mp4; LAUNCHER record stop; fi",
+    false,
+  ],
+  [
+    "an if whose condition list succeeds",
+    "if false || true; then LAUNCHER record start /tmp/demo/voice.mp4; LAUNCHER record stop; fi",
+    true,
+  ],
+  [
     "a certain exit before it",
     "exit 0; LAUNCHER record start /tmp/demo/voice.mp4; LAUNCHER record stop",
     false,
@@ -1450,6 +1460,40 @@ it.each([
     assert.equal(checks.find((c) => c.check.startsWith("maxCalls device"))?.pass, pass);
   },
 );
+
+it.each([
+  [
+    "a called JS function",
+    "run(['record', 'start', '/tmp/demo/voice.mp4']); run(['record', 'stop'])",
+    true,
+  ],
+  [
+    "an uncalled JS arrow function",
+    "const rec = () => run(['record', 'start', '/tmp/demo/voice.mp4']); run(['record', 'stop'])",
+    false,
+  ],
+] as const)("credits recordings from scripts only for calls that run: %s", (_, body, pass) => {
+  const launcher = "/home/user/.t3/userdata/device/bin/agent-device";
+  // The parser reads literal argv, so each call names the launcher.
+  const script = `${body.replaceAll("run(", `require('child_process').execFileSync('${launcher}', `)};`;
+  const calls = [
+    {
+      step: 0,
+      tool: "Bash",
+      failed: false,
+      output: "ok",
+      input: { command: `node -e "${script}"` },
+    },
+  ];
+  const run = {
+    calls,
+    launchers: [launcher],
+    text: "Saved /tmp/demo/voice.mp4",
+    stopReason: "end_turn",
+  };
+  const checks = gradeSample({ device: { recording: "/tmp/demo/voice.mp4" } }, run);
+  assert.equal(checks.find((check) => check.check.startsWith("device recording"))?.pass, pass);
+});
 
 it("leaves errored samples out of pass rates and lists them in the summary", () => {
   const usage = { input: 10, output: 0, cacheWrite: 0, cacheRead: 0 };

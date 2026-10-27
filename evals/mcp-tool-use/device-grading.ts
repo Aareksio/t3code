@@ -311,7 +311,14 @@ function scriptInvocations(
     }
     if (program !== undefined) {
       const line = script.slice(script.lastIndexOf("\n", i) + 1, i);
-      const certain = python ? !/^\s/.test(line) : !script.slice(0, i).includes("{");
+      // A call inside a function, arrow or lambda that is never called doesn't run.
+      const statement = script.slice(
+        Math.max(script.lastIndexOf(";", i), script.lastIndexOf("\n", i)) + 1,
+        i,
+      );
+      const certain =
+        !/=>|\bfunction\b|\blambda\b/.test(statement) &&
+        (python ? !/^\s/.test(line) : !script.slice(0, i).includes("{"));
       actions.push(
         ...shellInvocations(program, new Map(variables), remote).map((action) => ({
           ...action,
@@ -426,6 +433,9 @@ export function shellInvocations(
     }
     if (words[0] === "then") {
       const condition = conditions.at(-1);
+      // The branch follows the condition list's final status (`if true && false`), not its
+      // first command's.
+      if (condition) condition.take = condition.before === true ? false : status;
       active =
         condition?.parent !== false && condition?.take !== false && condition?.before !== true;
       certain =

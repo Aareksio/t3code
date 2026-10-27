@@ -1,7 +1,9 @@
 // @effect-diagnostics nodeBuiltinImport:off globalConsole:off
 // Runs CI's fast checks for this branch's changes: format and lint of the
 // changed files, knip, generated GraphQL operations, typecheck of the affected
-// packages and their dependents, and the test files beside the changed files.
+// packages and their dependents, the test files beside the changed files, and
+// the cross-file checks those miss (agent context budget, effect budget keys,
+// React Compiler coverage of the changed client files).
 // A dependency change also gets the unused-patch install check below. CI still
 // runs the full test suites and the jobs listed in the summary.
 //
@@ -138,6 +140,62 @@ for (const file of code) {
     if (entry.startsWith(prefix) && TEST.test(entry)) tests.add(NodePath.join(dir, entry));
   }
 }
+// These read files other than the ones beside them, so no changed file selects them.
+if (affected.includes("t3")) tests.add("apps/server/src/provider/AgentContextBudget.test.ts");
+const BUDGET = "scripts/effect-budget.json";
+const budgetChanged = files.includes(BUDGET);
+if (budgetChanged || present.length < files.length) tests.add("scripts/effect-budget.test.ts");
+// An edited budget number only fails when lint reads the file it names.
+const lintFiles = budgetChanged
+  ? [
+      ...new Set([
+        ...code,
+        ...Object.keys(JSON.parse(NodeFS.readFileSync(NodePath.join(root, BUDGET), "utf8"))),
+      ]),
+    ]
+  : code;
+
+// React Compiler coverage compiles every client source file, so run only the
+// changed files' cases. Each app gets its own step: a -t filter in the main
+// test step would drop every other test. Skipped when the main step already
+// runs the coverage file unfiltered. File filters mirror each coverage test.
+const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const compilerCoverage = [
+  {
+    app: "web",
+    test: "apps/web/src/reactCompilerCoverage.test.ts",
+    root: "apps/web/src/",
+    // Test names keep the repo-relative path.
+    name: (file: string) => file,
+    compiled: (file: string) =>
+      /\.tsx?$/.test(file) && !/\.(test|browser)\.tsx?$/.test(file) && !file.endsWith(".gen.ts"),
+    // Web has only per-file cases.
+    always: [],
+  },
+  {
+    app: "mobile",
+    test: "apps/mobile/src/reactCompilerCoverage.test.ts",
+    root: "apps/mobile/src/",
+    name: (file: string) => file.slice("apps/mobile/".length),
+    compiled: (file: string) => /\.tsx?$/.test(file) && !/\.(test\.tsx?|d\.ts)$/.test(file),
+    // The Metro, cache, and stale-allowlist cases check more than one file, deletions included.
+    always: ["^(?!.*compiles )"],
+  },
+].flatMap(({ app, test, root: appRoot, name, compiled, always }) => {
+  const changed = files.filter((file) => file.startsWith(appRoot) && compiled(file));
+  if (changed.length === 0 || tests.has(test)) return [];
+  const names = changed
+    .filter((file) => present.includes(file))
+    .map((file) => `compiles ${escapeRegExp(name(file))}$`);
+  const pattern = [...names, ...always];
+  if (pattern.length === 0) return [];
+  return [
+    {
+      name: `react compiler (${app}, ${names.length} files)`,
+      args: ["test", "run", test, "-t", pattern.join("|")],
+    },
+  ];
+});
 
 // knip:check cannot be scoped to a package. Any code change can leave a file,
 // export, or dependency unused (removing the last import of a helper does), so
@@ -230,7 +288,7 @@ const steps = [
     name: "format",
     args: ["fmt", "--check", "--no-error-on-unmatched-pattern", ...present],
   },
-  code.length > 0 && { name: "lint", args: ["lint", ...code] },
+  lintFiles.length > 0 && { name: "lint", args: ["lint", ...lintFiles] },
   ...(runKnip ? knipPasses : []),
   ...graphql.map((dir) => ({
     name: `graphql (${dir})`,
@@ -255,6 +313,7 @@ const steps = [
     name: `test (${tests.size} files)`,
     args: ["test", "run", "--passWithNoTests", ...tests],
   },
+  ...compilerCoverage,
 ].filter((step) => step !== false);
 
 // Output is piped, so keep the colors a terminal would get.

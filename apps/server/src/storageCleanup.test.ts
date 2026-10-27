@@ -273,6 +273,7 @@ const cleanupFixture = (
     let editBeforeRemoval = false;
     let openSessionCwd: string | null = null;
     let sessionLive = true;
+    let onLiveCheck: Effect.Effect<void> = Effect.void;
     let outboxStatus: string | null = null;
     let fullStatusCalls = 0;
     let snapshotReads = 0;
@@ -342,7 +343,8 @@ const cleanupFixture = (
           Effect.sync(() => threads.find((thread) => thread.id === threadId) ?? null),
       } as unknown as ProjectionStore.ProjectionStoreV2["Service"]),
       Effect.provideService(ProviderSessionManager.ProviderSessionManagerV2, {
-        isLive: () => Effect.sync(() => sessionLive),
+        isLive: () =>
+          Effect.sync(() => sessionLive).pipe(Effect.tap(() => Effect.suspend(() => onLiveCheck))),
       } as unknown as ProviderSessionManager.ProviderSessionManagerV2["Service"]),
       Effect.provideService(Orchestrator.OrchestratorV2, {
         streamDomainEvents: Stream.suspend(() => events),
@@ -437,6 +439,9 @@ const cleanupFixture = (
       },
       setThreads: (next: typeof threads) => {
         threads = next;
+      },
+      setOnLiveCheck: (hook: Effect.Effect<void>) => {
+        onLiveCheck = hook;
       },
       setOutboxStatus: (status: string | null) => {
         outboxStatus = status;
@@ -1095,6 +1100,7 @@ describe("deleted thread worktrees", () => {
             });
             yield* fixture.setTerminals([]);
           }),
+          fixture.repo,
         );
         expect(reads).toBeGreaterThan(0);
         expect(yield* fixture.fs.exists(fixture.worktree)).toBe(false);
@@ -1183,6 +1189,80 @@ describe("deleted thread worktrees", () => {
           fixture.repo,
         );
         expect(reads).toBe(0);
+      }).pipe(Effect.provide(cleanupTestLayer), Effect.scoped),
+  );
+
+  it.effect(
+    "removes a deleted thread's worktree when its session stops during the deletion's sweep",
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const fixture = yield* cleanupFixture({
+          ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+          worktreeAfterDays: null,
+          worktreeOnDelete: true,
+        });
+        const owner = parent(fixture.worktree);
+        fixture.setThreads([]);
+        const startupSwept = yield* Deferred.make<void>();
+        const sessionChecked = yield* Deferred.make<void>();
+        const delivered = yield* Deferred.make<void>();
+        const deleted = {
+          id: EventId.make("event:thread-deleted"),
+          type: "thread.deleted",
+          threadId: owner.id,
+          occurredAt: at(0),
+          payload: owner,
+        } as unknown as OrchestrationV2DomainEvent;
+        const stopped: OrchestrationV2DomainEvent = {
+          id: EventId.make("event:session-stopped"),
+          type: "provider-session.updated",
+          threadId: owner.id,
+          occurredAt: at(0),
+          payload: {
+            id: ProviderSessionId.make("session-1"),
+            driver: ProviderDriverKind.make("codex"),
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            status: "stopped",
+            cwd: fixture.worktree,
+            model: null,
+            capabilities: CodexProviderCapabilitiesV2,
+            createdAt: at(-DAY_MS),
+            updatedAt: at(0),
+            lastError: null,
+          },
+        };
+        yield* fixture.activate(
+          Stream.fromEffect(Deferred.await(startupSwept)).pipe(
+            Stream.flatMap(() => Stream.make(deleted)),
+            Stream.concat(Stream.fromEffect(Deferred.await(sessionChecked)).pipe(Stream.drain)),
+            Stream.concat(Stream.make(stopped)),
+            Stream.concat(
+              Stream.fromEffect(Deferred.succeed(delivered, undefined)).pipe(Stream.drain),
+            ),
+          ),
+        );
+        yield* fixture.service.reports.pipe(
+          Stream.filter((report) => report !== null),
+          Stream.take(1),
+          Stream.runDrain,
+        );
+        yield* fixture.service.drain;
+        fixture.setDeletedThreads([owner]);
+        fixture.setOpenSessionCwd(fixture.worktree);
+        // The deletion's sweep sees the session live; it stops before that sweep publishes its result.
+        fixture.setOnLiveCheck(
+          Effect.gen(function* () {
+            fixture.setOnLiveCheck(Effect.void);
+            yield* Deferred.succeed(sessionChecked, undefined);
+            yield* Deferred.await(delivered);
+            fixture.setSessionLive(false);
+          }),
+        );
+        yield* Deferred.succeed(startupSwept, undefined);
+        yield* Deferred.await(delivered);
+        yield* fixture.service.drain;
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(false);
       }).pipe(Effect.provide(cleanupTestLayer), Effect.scoped),
   );
 

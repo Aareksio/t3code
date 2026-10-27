@@ -273,6 +273,7 @@ const cleanupFixture = (
     let editBeforeRemoval = false;
     let openSessionCwd: string | null = null;
     let sessionLive = true;
+    let outboxStatus: string | null = null;
     let fullStatusCalls = 0;
     let snapshotReads = 0;
     let terminalListener: ((event: TerminalMetadataStreamEvent) => Effect.Effect<void>) | undefined;
@@ -365,17 +366,19 @@ const cleanupFixture = (
                   }),
                 },
               ]
-            : strings.join("").includes("deleted_at IS NOT NULL")
-              ? deletedThreads.map((thread) => ({
-                  payload_json: JSON.stringify(thread),
-                  workspaceRoot: repo,
-                }))
-              : strings.join("").includes('AS "worktreePath"')
-                ? [
-                    ...threads.flatMap((thread) => thread.worktreePath ?? []),
-                    ...storedWorktreePaths,
-                  ].map((worktreePath) => ({ worktreePath }))
-                : [],
+            : outboxStatus !== null && strings.join("").includes("orchestration_v2_effect_outbox")
+              ? [{ status: outboxStatus }]
+              : strings.join("").includes("deleted_at IS NOT NULL")
+                ? deletedThreads.map((thread) => ({
+                    payload_json: JSON.stringify(thread),
+                    workspaceRoot: repo,
+                  }))
+                : strings.join("").includes('AS "worktreePath"')
+                  ? [
+                      ...threads.flatMap((thread) => thread.worktreePath ?? []),
+                      ...storedWorktreePaths,
+                    ].map((worktreePath) => ({ worktreePath }))
+                  : [],
         )) as unknown as SqlClient.SqlClient),
       Effect.provideService(GitManager.GitManager, {
         invalidateStatus: () => Effect.void,
@@ -434,6 +437,9 @@ const cleanupFixture = (
       },
       setThreads: (next: typeof threads) => {
         threads = next;
+      },
+      setOutboxStatus: (status: string | null) => {
+        outboxStatus = status;
       },
       setDeletedThreads: (next: OrchestrationV2ThreadShell[]) => {
         deletedThreads = next;
@@ -1148,6 +1154,36 @@ describe("deleted thread worktrees", () => {
       expect(reads).toBe(0);
       expect(yield* fixture.fs.exists(fixture.worktree)).toBe(true);
     }).pipe(Effect.provide(cleanupTestLayer), Effect.scoped),
+  );
+
+  it.effect(
+    "does not sweep for a deleted thread whose cleanup effect failed when a session elsewhere stops",
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const fixture = yield* cleanupFixture({
+          ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+          worktreeAfterDays: null,
+          worktreeOnDelete: true,
+        });
+        const owner = parent(fixture.worktree);
+        fixture.setDeletedThreads([owner]);
+        fixture.setThreads([]);
+        fixture.setOutboxStatus("failed");
+        const reads = yield* stopSessionAfterStartupSweep(
+          fixture,
+          ThreadId.make("thread-elsewhere"),
+          Effect.gen(function* () {
+            expect((yield* fixture.service.latestReport)?.entries[0]).toMatchObject({
+              threadId: owner.id,
+              outcome: "kept",
+              reason: "Thread deletion is still pending",
+            });
+          }),
+          fixture.repo,
+        );
+        expect(reads).toBe(0);
+      }).pipe(Effect.provide(cleanupTestLayer), Effect.scoped),
   );
 
   it.effect("waits out the settle grace of a subagent that just settled", () =>

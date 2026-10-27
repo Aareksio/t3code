@@ -125,6 +125,7 @@ describe("new thread model fallback", () => {
     for (const candidate of [
       { ...available, enabled: false },
       { ...available, installed: false },
+      { ...available, auth: { status: "unauthenticated" as const } },
     ]) {
       expect(
         resolveNewThreadModelSelection({

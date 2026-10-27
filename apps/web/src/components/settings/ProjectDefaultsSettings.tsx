@@ -269,7 +269,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
       title="Fallback model"
       description="Used for new threads when the default model's provider is out of usage."
       resetAction={
-        settings.fallbackModelSelection !== null ? (
+        mixedFallback || settings.fallbackModelSelection !== null ? (
           <SettingResetButton
             label="fallback model"
             onClick={() => updateSettings({ fallbackModelSelection: null })}

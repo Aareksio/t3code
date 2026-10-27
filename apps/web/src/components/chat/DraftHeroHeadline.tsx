@@ -203,17 +203,24 @@ export function DraftHeroHeadline({
         ? resolveProjectSettings(environmentSettings, project.id, project).settings
             .defaultModelSelection
         : project.defaultModelSelection;
-      const defaultModelSelection = resolveNewThreadModelSelection({
-        defaultSelection: resolveDefaultProviderModelSelection(
-          providersByEnvironment.get(project.environmentId) ?? [],
-          defaultSelection,
-        ),
+      const fallbackResolution = resolveNewThreadModelSelection({
+        defaultSelection:
+          defaultSelection ??
+          (useComposerDraftStore.getState().stickyActiveProvider !== null
+            ? null
+            : resolveDefaultProviderModelSelection(
+                providersByEnvironment.get(project.environmentId) ?? [],
+                null,
+              )),
         fallbackSelection: environmentSettings?.fallbackModelSelection ?? null,
         providers: providersByEnvironment.get(project.environmentId) ?? [],
         ...(environmentSettings ? { settings: environmentSettings } : {}),
         projectId: project.id,
         now: Date.now(),
-      }).selection;
+      });
+      const defaultModelSelection = fallbackResolution.fallback
+        ? fallbackResolution.selection
+        : defaultSelection;
       if (defaultModelSelection) {
         setModelSelection(draftId, defaultModelSelection, {
           replaceOptions: true,

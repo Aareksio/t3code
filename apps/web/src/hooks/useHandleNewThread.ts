@@ -137,10 +137,11 @@ export function createNewThreadHandler(router: AnyRouter) {
       project?.id ?? null,
       project,
     );
-    const projectDefaultModelSelection = resolveNewThreadModelSelection({
+    const configuredDefaultModelSelection = projectSettings.settings.defaultModelSelection ?? null;
+    const fallbackResolution = resolveNewThreadModelSelection({
       defaultSelection:
-        projectSettings.settings.defaultModelSelection ??
-        (carryModelSelection
+        configuredDefaultModelSelection ??
+        (carryModelSelection || useComposerDraftStore.getState().stickyActiveProvider !== null
           ? null
           : resolveDefaultProviderModelSelection(
               environmentServerConfigs.get(projectRef.environmentId)?.providers ?? [],
@@ -151,7 +152,10 @@ export function createNewThreadHandler(router: AnyRouter) {
       settings: targetServerSettings,
       projectId: projectRef.projectId,
       now: Date.now(),
-    }).selection;
+    });
+    const projectDefaultModelSelection = fallbackResolution.fallback
+      ? fallbackResolution.selection
+      : configuredDefaultModelSelection;
     const defaultRuntimeMode = projectSettings.settings.defaultRuntimeMode;
     const resolveModelSelectionOverride = (destinationDraftId: DraftId) =>
       resolveNewThreadModelSelectionOverride({

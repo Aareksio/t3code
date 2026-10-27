@@ -54,6 +54,7 @@ export function resolveNewThreadModelSelection(input: {
     !window ||
     !fallback?.enabled ||
     !fallback.installed ||
+    fallback.auth.status === "unauthenticated" ||
     !isProviderAvailable(fallback) ||
     exhaustedUsageWindow(fallback, input.now) ||
     (input.settings &&

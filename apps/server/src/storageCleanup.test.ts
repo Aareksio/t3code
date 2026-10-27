@@ -1094,6 +1094,39 @@ describe("deleted thread worktrees", () => {
       }).pipe(Effect.provide(cleanupTestLayer), Effect.scoped),
   );
 
+  it.effect(
+    "retries a deleted thread's worktree kept for another reason once a session in it stops",
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const fixture = yield* cleanupFixture({
+          ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+          worktreeAfterDays: null,
+          worktreeOnDelete: true,
+        });
+        const owner = parent(fixture.worktree);
+        fixture.setDeletedThreads([owner]);
+        fixture.setThreads([]);
+        fixture.setOpenSessionCwd(fixture.worktree);
+        yield* fixture.fs.writeFileString(`${fixture.worktree}/tracked.txt`, "agent edit\n");
+        const reads = yield* stopSessionAfterStartupSweep(
+          fixture,
+          owner.id,
+          Effect.gen(function* () {
+            expect((yield* fixture.service.latestReport)?.entries[0]).toMatchObject({
+              threadId: owner.id,
+              outcome: "kept",
+              reason: "Has uncommitted changes (1 file)",
+            });
+            yield* fixture.fs.writeFileString(`${fixture.worktree}/tracked.txt`, "original\n");
+            fixture.setSessionLive(false);
+          }),
+        );
+        expect(reads).toBeGreaterThan(0);
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(false);
+      }).pipe(Effect.provide(cleanupTestLayer), Effect.scoped),
+  );
+
   it.effect("waits out the settle grace of a subagent that just settled", () =>
     Effect.gen(function* () {
       yield* TestClock.setTime(NOW_MS);

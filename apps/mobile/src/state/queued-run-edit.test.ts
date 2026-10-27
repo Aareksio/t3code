@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { Atom } from "effect/reactivity";
 import {
   ChatAttachmentId,
@@ -20,7 +20,25 @@ import {
   type QueuedRunEdit,
 } from "./queued-run-edit";
 import { threadComposerErrorsAtom } from "./thread-composer-error";
-import { getComposerDraftSnapshot, setComposerDraftText } from "./use-composer-drafts";
+import {
+  flushComposerDrafts,
+  getComposerDraftSnapshot,
+  setComposerDraftText,
+  waitForComposerDraftsLoaded,
+} from "./use-composer-drafts";
+
+vi.mock("expo-file-system", () => ({
+  Directory: class {
+    create() {}
+  },
+  File: class {
+    exists = false;
+    create() {}
+    write() {}
+    moveSync() {}
+  },
+  Paths: { document: { uri: "file:///documents" } },
+}));
 
 const image = (id: string): ChatAttachment => ({
   type: "image",
@@ -110,7 +128,8 @@ describe("beginQueuedRunEdit", () => {
     expect(appAtomRegistry.get(threadComposerErrorsAtom)[threadKey]?.message).toBeUndefined();
   });
 
-  it("recovers text after a server attachment was removed", () => {
+  it("recovers text after a server attachment was removed", async () => {
+    await waitForComposerDraftsLoaded();
     const threadKey = "env-exit:thread-removed-recover";
     const runId = RunId.make("run-1");
     const runs = Atom.make<ReadonlyArray<{ readonly id: RunId; readonly status: string }> | null>([
@@ -120,6 +139,7 @@ describe("beginQueuedRunEdit", () => {
     removeQueuedRunEditAttachment(threadKey, "removed");
 
     appAtomRegistry.set(runs, [{ id: runId, status: "running" }]);
+    await flushComposerDrafts();
 
     expect(getQueuedRunEdit(threadKey)).toBeNull();
     expect(getComposerDraftSnapshot(threadKey).text).toBe("original");
@@ -129,7 +149,8 @@ describe("beginQueuedRunEdit", () => {
     );
   });
 
-  it("recovers changed text into an empty thread draft", () => {
+  it("recovers changed text into an empty thread draft", async () => {
+    await waitForComposerDraftsLoaded();
     const threadKey = "env-exit:thread-changed-recover";
     const runId = RunId.make("run-1");
     const runs = Atom.make<ReadonlyArray<{ readonly id: RunId; readonly status: string }> | null>([
@@ -139,6 +160,7 @@ describe("beginQueuedRunEdit", () => {
     setComposerDraftText(queuedEditDraftKey(threadKey, runId), "revised");
 
     appAtomRegistry.set(runs, [{ id: runId, status: "running" }]);
+    await flushComposerDrafts();
 
     expect(getQueuedRunEdit(threadKey)).toBeNull();
     expect(getComposerDraftSnapshot(threadKey).text).toBe("revised");

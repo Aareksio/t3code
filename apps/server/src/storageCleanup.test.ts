@@ -16,6 +16,8 @@ import {
   DEFAULT_SERVER_SETTINGS,
   type WorktreeKeepWhen,
   type StorageCleanupSettings,
+  type TerminalMetadataStreamEvent,
+  type TerminalSummary,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ServerConfig from "./config.ts";
@@ -273,6 +275,7 @@ const cleanupFixture = (
     let sessionLive = true;
     let fullStatusCalls = 0;
     let snapshotReads = 0;
+    let terminalListener: ((event: TerminalMetadataStreamEvent) => Effect.Effect<void>) | undefined;
     let events: Stream.Stream<OrchestrationV2DomainEvent> = Stream.empty;
     const activated = yield* Deferred.make<void>();
     const context = yield* Layer.build(StorageCleanup.layer).pipe(
@@ -378,13 +381,21 @@ const cleanupFixture = (
         invalidateStatus: () => Effect.void,
       } as unknown as GitManager.GitManager["Service"]),
       Effect.provideService(TerminalManager.TerminalManager, {
-        subscribeMetadata: () => Effect.succeed(() => {}),
+        subscribeMetadata: (
+          listener: (event: TerminalMetadataStreamEvent) => Effect.Effect<void>,
+        ) =>
+          Effect.sync(() => {
+            terminalListener = listener;
+            return () => {};
+          }),
       } as unknown as TerminalManager.TerminalManager["Service"]),
       Effect.provideService(ServerActivation, Deferred.await(activated)),
     );
     return {
       service: Context.get(context, StorageCleanup.StorageCleanup),
       repo,
+      setTerminals: (terminals: TerminalSummary[]) =>
+        terminalListener?.({ type: "snapshot", terminals }) ?? Effect.void,
       editBeforeRemoval: () => {
         editBeforeRemoval = true;
       },
@@ -1036,6 +1047,51 @@ describe("deleted thread worktrees", () => {
       expect(reads).toBeGreaterThan(0);
       expect(yield* fixture.fs.exists(fixture.worktree)).toBe(false);
     }).pipe(Effect.provide(cleanupTestLayer), Effect.scoped),
+  );
+
+  it.effect(
+    "removes a deleted thread's worktree once its terminal closes and its session stops",
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const fixture = yield* cleanupFixture({
+          ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+          worktreeAfterDays: null,
+          worktreeOnDelete: true,
+        });
+        const owner = parent(fixture.worktree);
+        fixture.setDeletedThreads([owner]);
+        fixture.setThreads([]);
+        yield* fixture.setTerminals([
+          {
+            threadId: owner.id,
+            terminalId: "terminal-1",
+            cwd: fixture.worktree,
+            worktreePath: fixture.worktree,
+            status: "running",
+            pid: 1,
+            exitCode: null,
+            exitSignal: null,
+            hasRunningSubprocess: false,
+            label: "Terminal",
+            updatedAt: DateTime.formatIso(at(0)),
+          },
+        ]);
+        const reads = yield* stopSessionAfterStartupSweep(
+          fixture,
+          owner.id,
+          Effect.gen(function* () {
+            expect((yield* fixture.service.latestReport)?.entries[0]).toMatchObject({
+              threadId: owner.id,
+              outcome: "kept",
+              reason: "Open terminal",
+            });
+            yield* fixture.setTerminals([]);
+          }),
+        );
+        expect(reads).toBeGreaterThan(0);
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(false);
+      }).pipe(Effect.provide(cleanupTestLayer), Effect.scoped),
   );
 
   it.effect("waits out the settle grace of a subagent that just settled", () =>

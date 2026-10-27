@@ -60,6 +60,9 @@ const resolveInstance = (
     ),
   );
 
+// Review guides investigate the checkout read-only; the other drivers reject that request.
+const INVESTIGATING_DRIVERS = new Set(["codex", "claudeAgent"]);
+
 /** @public */
 export const make = Effect.gen(function* () {
   const registry = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
@@ -110,6 +113,7 @@ export const make = Effect.gen(function* () {
             provider.auth.status !== "unauthenticated" &&
             isProviderAvailable(provider) &&
             isProviderTextGenerationCapable(provider) &&
+            (operation !== "generateReviewGuide" || INVESTIGATING_DRIVERS.has(driver)) &&
             !exhaustedUsageWindow(provider, now, defaultTextGenerationModel(driver))
           );
         },

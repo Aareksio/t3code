@@ -312,8 +312,11 @@ function scriptInvocations(
     if (program !== undefined) {
       const line = script.slice(script.lastIndexOf("\n", i) + 1, i);
       // A call inside a function, arrow or lambda that is never called doesn't run.
+      // A JS statement can span lines (`() =>\n run(…)`); a Python one ends at its line.
       const statement = script.slice(
-        Math.max(script.lastIndexOf(";", i), script.lastIndexOf("\n", i)) + 1,
+        (python
+          ? Math.max(script.lastIndexOf(";", i), script.lastIndexOf("\n", i))
+          : script.lastIndexOf(";", i)) + 1,
         i,
       );
       const certain =

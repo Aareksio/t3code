@@ -1481,6 +1481,11 @@ it.each([
     true,
   ],
   [
+    "an uncalled JS arrow function whose body starts on the next line",
+    "const rec = () =>\n  run(['record', 'start', '/tmp/demo/voice.mp4']); run(['record', 'stop'])",
+    false,
+  ],
+  [
     "an uncalled JS arrow function",
     "const rec = () => run(['record', 'start', '/tmp/demo/voice.mp4']); run(['record', 'stop'])",
     false,

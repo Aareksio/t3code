@@ -928,15 +928,17 @@ export function gradeDevice(expect: typeof DeviceExpect.Type | undefined, run: D
       const screenshots = entry ? successfulScreenshots(entry) : [];
       for (const action of actions) {
         const { args, words } = action;
-        if (target.app && ["open", "close"].includes(args[0] ?? "")) {
+        // Only an open or close that ran and succeeded changes the app session.
+        const ran =
+          call.failed === false &&
+          action.executed &&
+          action.unmasked &&
+          !AGENT_DEVICE_ERROR.test(call.output ?? "");
+        if (target.app && ["open", "close"].includes(args[0] ?? "") && ran) {
           appSessions.delete(words[0]!);
           if (
             args[0] === "open" &&
             args[1] === target.app &&
-            call.failed === false &&
-            action.executed &&
-            action.unmasked &&
-            !AGENT_DEVICE_ERROR.test(call.output ?? "") &&
             (!action.sequenced ||
               (actions.filter((a) => a.args[0] === "open").length === 1 &&
                 /^Opened:/m.test(call.output ?? "")))

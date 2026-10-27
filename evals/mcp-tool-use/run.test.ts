@@ -2594,6 +2594,34 @@ it("fleet SESS-01 does not keep app credit after close or another app open", () 
         ],
       }),
     );
+  // A close or other open that failed or never ran leaves the app session in place.
+  for (const [command, failed_, output] of [
+    [`${good.launchers![0]} close`, true, undefined],
+    [
+      `${good.launchers![0]} open com.acme.other`,
+      false,
+      "Error (COMMAND_FAILED): app not installed",
+    ],
+    [`false && ${good.launchers![0]} close`, false, undefined],
+  ] as const)
+    assert.deepEqual(
+      failed(c.expect, {
+        ...good,
+        calls: [
+          ...good.calls.slice(0, -1),
+          {
+            step: 3,
+            tool: "Bash",
+            input: { command },
+            failed: failed_,
+            ...(output === undefined ? {} : { output }),
+          },
+          good.calls.at(-1)!,
+        ],
+      }),
+      [],
+      command,
+    );
 });
 
 it("fleet CAP-01 accepts a usable managed recovery, never a zero-size MCP claim", () => {

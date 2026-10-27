@@ -1,7 +1,12 @@
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import type { ProviderInstanceId } from "@t3tools/contracts";
+import type { ModelSelection, ProviderInstanceId } from "@t3tools/contracts";
+import { isProviderAvailable, isProviderTextGenerationCapable } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
+import { exhaustedUsageWindow } from "@t3tools/shared/usageLimits";
+import { fallbackTextGenerationModelSelection } from "@t3tools/shared/serverSettings";
+import * as ServerSettings from "../serverSettings.ts";
 import type { ProviderTextGeneration } from "@t3tools/provider-core/server/textGeneration";
 import { TextGenerationError } from "@t3tools/contracts";
 
@@ -56,44 +61,133 @@ const resolveInstance = (
 export const make = Effect.gen(function* () {
   const registry = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
   const sourceControl = yield* SourceControlProviderRegistry.SourceControlProviderRegistry;
+  const serverSettings = yield* ServerSettings.ServerSettingsService;
+  const generate = Effect.fn("TextGeneration.generate")(function* <A>(
+    operation: TextGenerationOp,
+    selection: ModelSelection,
+    invoke: (
+      service: ProviderTextGeneration,
+      modelSelection: ModelSelection,
+    ) => Effect.Effect<A, TextGenerationError>,
+  ) {
+    const snapshots = yield* registry.listInstances.pipe(
+      Effect.flatMap((instances) =>
+        Effect.forEach(instances, (instance) => instance.snapshot.getSnapshot),
+      ),
+    );
+    const now = DateTime.toEpochMillis(yield* DateTime.now);
+    const limited = exhaustedUsageWindow(
+      snapshots.find((provider) => provider.instanceId === selection.instanceId),
+      now,
+    );
+    const call = (modelSelection: ModelSelection) =>
+      resolveInstance(registry, operation, modelSelection.instanceId).pipe(
+        Effect.flatMap((service) => invoke(service, modelSelection)),
+      );
+    const retry = Effect.fn("TextGeneration.retryLimitedProvider")(function* () {
+      const settings = yield* serverSettings.getSettings.pipe(
+        Effect.mapError(
+          (cause) =>
+            new TextGenerationError({
+              operation,
+              detail: "Could not read fallback model settings.",
+              cause,
+            }),
+        ),
+      );
+      const fallback = fallbackTextGenerationModelSelection(
+        settings.providerInstances,
+        (instanceId) => {
+          const provider = snapshots.find((candidate) => candidate.instanceId === instanceId);
+          return (
+            instanceId !== selection.instanceId &&
+            provider?.enabled === true &&
+            provider.installed &&
+            isProviderAvailable(provider) &&
+            isProviderTextGenerationCapable(provider) &&
+            !exhaustedUsageWindow(provider, now)
+          );
+        },
+        {
+          includeConfiguredInstances: true,
+          ...(settings.fallbackModelSelection
+            ? { preferredInstanceId: settings.fallbackModelSelection.instanceId }
+            : {}),
+        },
+      );
+      return fallback;
+    });
+    if (limited) {
+      const fallback = yield* retry();
+      if (fallback) return yield* call(fallback);
+      return yield* call(selection);
+    }
+    return yield* call(selection).pipe(
+      Effect.catchTags({
+        TextGenerationError: Effect.fn("TextGeneration.handleFailure")(function* (error) {
+          let cause: unknown = error;
+          let usageLimited = false;
+          for (let depth = 0; depth < 8 && cause && typeof cause === "object"; depth++) {
+            const failure = cause as {
+              class?: unknown;
+              code?: unknown;
+              detail?: unknown;
+              message?: unknown;
+              cause?: unknown;
+            };
+            usageLimited ||=
+              failure.class === "usage_limit" ||
+              [failure.code, failure.detail, failure.message].some(
+                (text) =>
+                  typeof text === "string" &&
+                  /usage[_ -]?limit|rate[_ -]?limit|quota.{0,30}(?:exceed|exhaust)|(?:exceed|exhaust).{0,30}quota|out of (?:usage|credits)|(?:you've hit|reached) your limit|too many requests/i.test(
+                    text,
+                  ),
+              );
+            cause = failure.cause;
+          }
+          if (!usageLimited) return yield* error;
+          const fallback = yield* retry();
+          return fallback ? yield* call(fallback) : yield* error;
+        }),
+      }),
+    );
+  });
   return TextGeneration.of({
     generateCommitMessage: Effect.fn("TextGeneration.generateCommitMessage")(function (input) {
-      return resolveInstance(
-        registry,
-        "generateCommitMessage",
-        input.modelSelection.instanceId,
-      ).pipe(Effect.flatMap((textGeneration) => textGeneration.generateCommitMessage(input)));
+      return generate("generateCommitMessage", input.modelSelection, (service, modelSelection) =>
+        service.generateCommitMessage({ ...input, modelSelection }),
+      );
     }),
     generatePrContent: Effect.fn("TextGeneration.generatePrContent")(function (input) {
-      return resolveInstance(registry, "generatePrContent", input.modelSelection.instanceId).pipe(
-        Effect.flatMap((textGeneration) => textGeneration.generatePrContent(input)),
+      return generate("generatePrContent", input.modelSelection, (service, modelSelection) =>
+        service.generatePrContent({ ...input, modelSelection }),
       );
     }),
     generateBranchName: Effect.fn("TextGeneration.generateBranchName")(function (input) {
-      return resolveInstance(registry, "generateBranchName", input.modelSelection.instanceId).pipe(
-        Effect.flatMap((textGeneration) => textGeneration.generateBranchName(input)),
+      return generate("generateBranchName", input.modelSelection, (service, modelSelection) =>
+        service.generateBranchName({ ...input, modelSelection }),
       );
     }),
     generateReviewGuide: Effect.fn("TextGeneration.generateReviewGuide")(function (input) {
-      return resolveInstance(registry, "generateReviewGuide", input.modelSelection.instanceId).pipe(
-        Effect.flatMap((textGeneration) => textGeneration.generateReviewGuide(input)),
+      return generate("generateReviewGuide", input.modelSelection, (service, modelSelection) =>
+        service.generateReviewGuide({ ...input, modelSelection }),
       );
     }),
-    generateThreadTitle: Effect.fn("TextGeneration.generateThreadTitle")(function (input) {
-      return resolveInstance(registry, "generateThreadTitle", input.modelSelection.instanceId).pipe(
-        Effect.flatMap((textGeneration) =>
-          Effect.gen(function* () {
-            const linkedContext =
-              input.linkedContext ??
-              (yield* ThreadTitleLinks.resolveThreadTitleLinks(input).pipe(
-                Effect.provideService(
-                  SourceControlProviderRegistry.SourceControlProviderRegistry,
-                  sourceControl,
-                ),
-              ));
-            return yield* textGeneration.generateThreadTitle({ ...input, linkedContext });
-          }),
-        ),
+    generateThreadTitle: Effect.fn("TextGeneration.generateThreadTitle")(function* (input) {
+      const linkedContext =
+        input.linkedContext ??
+        (yield* ThreadTitleLinks.resolveThreadTitleLinks(input).pipe(
+          Effect.provideService(
+            SourceControlProviderRegistry.SourceControlProviderRegistry,
+            sourceControl,
+          ),
+        ));
+      return yield* generate(
+        "generateThreadTitle",
+        input.modelSelection,
+        (service, modelSelection) =>
+          service.generateThreadTitle({ ...input, linkedContext, modelSelection }),
       );
     }),
   });

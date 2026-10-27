@@ -1,3 +1,5 @@
+import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   CommandId,
   type RunId,
@@ -979,17 +981,30 @@ const make = Effect.gen(function* () {
       ),
     );
 
-  const projectDefaultModelSelection = (
-    project: Effect.Success<ReturnType<typeof requireProject>>,
-  ) =>
-    project.defaultModelSelection === null
+  const projectDefaultModelSelection = Effect.fn(
+    "OrchestratorMcpService.projectDefaultModelSelection",
+  )(function* (project: Effect.Success<ReturnType<typeof requireProject>>) {
+    const settings = yield* serverSettings.getSettings.pipe(
+      Effect.mapError(() => failure("orchestration_error", "Unable to read server settings.")),
+    );
+    const selection = resolveNewThreadModelSelection({
+      defaultSelection: resolveProjectSettings(settings, project.id, project).settings
+        .defaultModelSelection,
+      fallbackSelection: settings.fallbackModelSelection,
+      providers: yield* providerRegistry.getProviders,
+      settings,
+      projectId: project.id,
+      now: DateTime.toEpochMillis(yield* DateTime.now),
+    }).selection;
+    return yield* selection === null
       ? Effect.fail(
           failure(
             "invalid_request",
             `Project ${project.id} has no default model, so this caller cannot pick one for it.`,
           ),
         )
-      : Effect.succeed(project.defaultModelSelection);
+      : Effect.succeed(selection);
+  });
   const secretRequests = yield* SecretRequests.SecretRequests;
 
   const requireCapability = (scope: McpInvocationScope) =>

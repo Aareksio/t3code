@@ -10,6 +10,8 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
+import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
+import * as ProviderRegistry from "./provider/ProviderRegistry.ts";
 import * as Cause from "effect/Cause";
 import * as Console from "effect/Console";
 import * as Context from "effect/Context";
@@ -293,8 +295,18 @@ const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
           projectId: project.id,
           title: "New thread",
           modelSelection:
-            resolveProjectSettings(settings, project.id, project).settings.defaultModelSelection ??
-            threadModelSelection,
+            resolveNewThreadModelSelection({
+              defaultSelection:
+                resolveProjectSettings(settings, project.id, project).settings
+                  .defaultModelSelection ?? threadModelSelection,
+              fallbackSelection: settings.fallbackModelSelection,
+              providers: yield* ProviderRegistry.ProviderRegistry.pipe(
+                Effect.flatMap((registry) => registry.getProviders),
+              ),
+              settings,
+              projectId: project.id,
+              now: DateTime.toEpochMillis(yield* DateTime.now),
+            }).selection ?? threadModelSelection,
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
           runtimeMode: resolveProjectSettings(settings, project.id, project).settings
             .defaultRuntimeMode,

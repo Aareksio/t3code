@@ -1,4 +1,5 @@
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
+import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
 import { queuedRunEditBlockedReason } from "@t3tools/client-runtime/queued-run-edit";
 import { ScrollToEndButton, WorkspaceFileDropOverlay } from "./chat/TimelineOverlays";
 import { usePasteToFocusComposer } from "./chat/usePasteToFocusComposer";
@@ -186,6 +187,7 @@ import {
   applyProviderInstanceSettings,
   deriveProviderInstanceEntries,
   NO_PROVIDER_MODEL_SELECTION,
+  resolveDefaultProviderModelSelection,
   shouldShowInstanceBadge,
   sortProviderInstanceEntries,
 } from "../providerInstances";
@@ -585,6 +587,9 @@ export default function ChatView(props: ChatViewProps) {
       ? (draft.modelSelectionByProvider[draft.activeProvider] ?? null)
       : null;
   });
+  const composerModelSelectionExplicit = useComposerDraftStore(
+    (store) => store.getComposerDraft(composerDraftTarget)?.modelSelectionExplicit === true,
+  );
   const composerHasAttachments = useComposerDraftStore((store) => {
     const draft = store.getComposerDraft(composerDraftTarget);
     return (draft?.images.length ?? 0) > 0 || (draft?.files.length ?? 0) > 0;
@@ -755,15 +760,26 @@ export default function ChatView(props: ChatViewProps) {
       });
     }
   }
+  const nowMinute = useNowMinute();
   const localDraftThread = draftThread
     ? buildLocalDraftThread(
         threadId,
         draftThread,
-        resolveProjectSettings(
+        resolveNewThreadModelSelection({
+          defaultSelection: resolveDefaultProviderModelSelection(
+            providersByEnvironment.get(draftThread.environmentId) ?? [],
+            resolveProjectSettings(
+              settings,
+              fallbackDraftProject?.id ?? null,
+              fallbackDraftProject ?? undefined,
+            ).settings.defaultModelSelection,
+          ),
+          fallbackSelection: settings.fallbackModelSelection,
+          providers: providersByEnvironment.get(draftThread.environmentId) ?? [],
           settings,
-          fallbackDraftProject?.id ?? null,
-          fallbackDraftProject ?? undefined,
-        ).settings.defaultModelSelection ?? NO_PROVIDER_MODEL_SELECTION,
+          projectId: draftThread.projectId,
+          now: Date.parse(`${nowMinute}:00Z`),
+        }).selection ?? NO_PROVIDER_MODEL_SELECTION,
       )
     : undefined;
   const isServerThread = serverThread !== null;
@@ -1055,7 +1071,20 @@ export default function ChatView(props: ChatViewProps) {
   const activeProjectScripts = activeProject ? resolveProjectScripts(settings, activeProject) : [];
   const { projectCloneBannerItem, projectCloneSendBlockReason } =
     useProjectCloneBanner(activeProjectRef);
-  const activeProjectDefaultModelSelection = activeProjectSettings.settings.defaultModelSelection;
+  const defaultModelResolution = resolveNewThreadModelSelection({
+    defaultSelection: resolveDefaultProviderModelSelection(
+      providersByEnvironment.get(activeThread?.environmentId ?? environmentId) ?? [],
+      activeProjectSettings.settings.defaultModelSelection,
+    ),
+    fallbackSelection: settings.fallbackModelSelection,
+    providers: providersByEnvironment.get(activeThread?.environmentId ?? environmentId) ?? [],
+    settings,
+    projectId: activeProject?.id ?? null,
+    now: Date.parse(`${nowMinute}:00Z`),
+  });
+  const activeProjectDefaultModelSelection = isServerThread
+    ? activeProjectSettings.settings.defaultModelSelection
+    : defaultModelResolution.selection;
   const handleNewThreadInActiveProject = () => {
     startNewThreadForProject(activeProjectRef, handleNewThread);
   };
@@ -2360,7 +2389,6 @@ export default function ChatView(props: ChatViewProps) {
     closeRightPanelSurface,
   });
   const pullRequestSurfaceAvailable = supportsPullRequests && pullRequestPanelTarget !== null;
-  const nowMinute = useNowMinute();
   const {
     acknowledgeActiveThreadWoke,
     activeBranchMismatchKey,
@@ -2529,12 +2557,34 @@ export default function ChatView(props: ChatViewProps) {
         })
       : null;
   const composerBannerItems = (() => {
+    const fallback =
+      !isServerThread &&
+      !composerModelSelectionExplicit &&
+      defaultModelResolution.fallback &&
+      (!composerSelectedModelSelection ||
+        (composerSelectedModelSelection.instanceId ===
+          defaultModelResolution.selection?.instanceId &&
+          composerSelectedModelSelection.model === defaultModelResolution.selection?.model))
+        ? defaultModelResolution.fallback
+        : null;
+    const fallbackItems: ComposerBannerStackItem[] =
+      fallback && defaultModelResolution.selection
+        ? [
+            {
+              id: "fallback-model",
+              variant: "info",
+              icon: null,
+              title: `${fallback.provider.displayName ?? fallback.provider.driver} is out of usage${fallback.resetsAt ? ` until ${new Date(fallback.resetsAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : ""}. Using ${providerStatuses.find((provider) => provider.instanceId === defaultModelResolution.selection?.instanceId)?.models.find((model) => model.slug === defaultModelResolution.selection?.model)?.name ?? defaultModelResolution.selection.model}.`,
+            },
+          ]
+        : [];
     const limitRecoveryItems = limitRecoveryBanner === null ? [] : [limitRecoveryBanner];
     const usageLimitsItems = usageLimitsBanner === null ? [] : [usageLimitsBanner];
     const projectCloneItems = projectCloneBannerItem === null ? [] : [projectCloneBannerItem];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
       return [
         ...feedbackBannerItems,
+        ...fallbackItems,
         ...limitRecoveryItems,
         ...usageLimitsItems,
         ...projectCloneItems,
@@ -2543,6 +2593,7 @@ export default function ChatView(props: ChatViewProps) {
     }
     return [
       ...feedbackBannerItems,
+      ...fallbackItems,
       ...limitRecoveryItems,
       ...usageLimitsItems,
       ...projectCloneItems,

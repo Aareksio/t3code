@@ -96,6 +96,7 @@ export function fallbackTextGenerationModelSelection(
   options?: {
     readonly includeConfiguredInstances?: boolean;
     readonly defaultModelSelection?: ModelSelection | null;
+    readonly preferredInstanceId?: ProviderInstanceId;
   },
 ): ModelSelection | null {
   const candidates = [
@@ -110,7 +111,10 @@ export function fallbackTextGenerationModelSelection(
         )
       : []),
   ];
-  const match = candidates.find(([instanceId, driver]) => isEnabled(instanceId, driver));
+  const preferred = candidates.find(([instanceId]) => instanceId === options?.preferredInstanceId);
+  const match = [...(preferred ? [preferred] : []), ...candidates].find(([instanceId, driver]) =>
+    isEnabled(instanceId, driver),
+  );
   if (match === undefined) return null;
   const [instanceId, driver] = match;
   const threadDefault = options?.defaultModelSelection;
@@ -566,6 +570,9 @@ export function applyServerSettingsPatch(
       : {}),
     ...(patch.defaultModelSelection !== undefined
       ? { defaultModelSelection: patch.defaultModelSelection }
+      : {}),
+    ...(patch.fallbackModelSelection !== undefined
+      ? { fallbackModelSelection: patch.fallbackModelSelection }
       : {}),
     ...(patch.defaultProjectScripts !== undefined
       ? { defaultProjectScripts: patch.defaultProjectScripts }

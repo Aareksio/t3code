@@ -20,6 +20,7 @@ import {
   paceOf,
   paceRemainingPercent,
   usesChatGptSharing,
+  resolveNewThreadModelSelection,
 } from "./usageLimits.ts";
 
 const now = Date.parse("2026-09-03T12:00:00.000Z");
@@ -49,6 +50,93 @@ function provider(overrides: Partial<ServerProvider>): ServerProvider {
     ...overrides,
   };
 }
+
+describe("new thread model fallback", () => {
+  const selection = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-6.1-sol" };
+  const fallback = { instanceId: ProviderInstanceId.make("claude"), model: "claude-fable-5-1" };
+  const limited = provider({
+    usageLimits: {
+      checkedAt: "2026-09-03T11:00:00.000Z",
+      windows: [{ ...window, usedPercent: 100 }],
+    },
+  });
+  const available = provider({
+    instanceId: fallback.instanceId,
+    driver: ProviderDriverKind.make("claudeAgent"),
+  });
+
+  it("uses an available fallback for an exhausted default", () => {
+    expect(
+      resolveNewThreadModelSelection({
+        defaultSelection: selection,
+        fallbackSelection: fallback,
+        providers: [limited, available],
+        now,
+      }).selection,
+    ).toEqual(fallback);
+  });
+  it("keeps the default without a usable fallback", () => {
+    for (const candidate of [null, fallback]) {
+      expect(
+        resolveNewThreadModelSelection({
+          defaultSelection: selection,
+          fallbackSelection: candidate,
+          providers: [limited, { ...available, usageLimits: limited.usageLimits }],
+          now,
+        }).selection,
+      ).toEqual(selection);
+    }
+  });
+  it("keeps explicit selections and ignores expired windows", () => {
+    expect(
+      resolveNewThreadModelSelection({
+        defaultSelection: selection,
+        explicitSelection: selection,
+        fallbackSelection: fallback,
+        providers: [limited, available],
+        now,
+      }).selection,
+    ).toEqual(selection);
+    expect(
+      resolveNewThreadModelSelection({
+        defaultSelection: selection,
+        fallbackSelection: fallback,
+        providers: [limited, available],
+        now: Date.parse("2026-09-04T00:00:00Z"),
+      }).selection,
+    ).toEqual(selection);
+  });
+  it("treats an unknown reset as exhausted and rejects disabled or unavailable fallbacks", () => {
+    const unknown = {
+      ...limited,
+      usageLimits: {
+        ...limited.usageLimits!,
+        windows: [{ ...window, usedPercent: 100, resetsAt: undefined }],
+      },
+    };
+    expect(
+      resolveNewThreadModelSelection({
+        defaultSelection: selection,
+        fallbackSelection: fallback,
+        providers: [unknown, available],
+        now,
+      }).selection,
+    ).toEqual(fallback);
+    for (const candidate of [
+      { ...available, enabled: false },
+      { ...available, installed: false },
+    ]) {
+      expect(
+        resolveNewThreadModelSelection({
+          defaultSelection: selection,
+          fallbackSelection: fallback,
+          providers: [unknown, candidate],
+          now,
+        }).selection,
+      ).toEqual(selection);
+    }
+  });
+});
 
 describe("pace", () => {
   it("places the clock three fifths through a five-hour window with two hours left", () => {

@@ -689,3 +689,493 @@ it("gives native children hook context while excluding the parent's T3 append an
   else assert.notInclude(shown, "SubagentStart hook additional context:");
   assert.include(shown, testCase.prompt);
 });
+
+// Round-5 adversarial review counterexamples.
+it.each([
+  ["Use device_open. Use ssh build-mac for screenshots.", "mixed"],
+  ["Use device_open. SSH handles screenshots and recordings.", "mixed"],
+  ["Use device_open. Take screenshots by SSH.", "mixed"],
+  ["Use device_open. SSH to build-mac and capture screenshots.", "mixed"],
+  ["Use device_open. SSH should not be avoided for screenshots.", "mixed"],
+  ["Use device_open. There is no need to avoid SSH for screenshots.", "mixed"],
+  [
+    "Use device_open. SSH is for builds, while screenshots go through the returned launcher.",
+    "managed",
+  ],
+  [
+    "Use device_open. SSH for builds and logs only, screenshots via the returned launcher.",
+    "managed",
+  ],
+  ["Use device_open. For screenshots, ssh into build-mac and run simctl.", "mixed"],
+  ["Use device_open. Use ssh to copy the saved screenshots back.", "managed"],
+  ["Use device_open. Copy saved artifacts over ssh.", "managed"],
+])("attributes route purposes and negation: %s", (brief, route) => {
+  assert.equal(briefRoute(brief), route);
+});
+
+it.each([
+  ["nohup-live", "ssh build-mac 'nohup xcrun simctl io PRIVATE recordVideo /tmp/raw.mov'", true],
+  [
+    "python-live",
+    "ssh build-mac 'python3 -' <<'PY'\nimport subprocess\nsubprocess.Popen(['xcrun', 'simctl', 'io', 'PRIVATE', 'recordVideo', '/tmp/raw.mov'])\nPY",
+    true,
+  ],
+  ["env-flag", "ssh build-mac 'env -i xcrun simctl io PRIVATE screenshot /tmp/proof.png'", true],
+  ["sudo-flag", "ssh build-mac 'sudo -n xcrun simctl io PRIVATE screenshot /tmp/proof.png'", true],
+  [
+    "caffeinate-flag",
+    "ssh build-mac 'caffeinate -i xcrun simctl io PRIVATE recordVideo /tmp/raw.mov'",
+    true,
+  ],
+  [
+    "timeout-option-arg",
+    "ssh build-mac 'timeout -s INT 30 xcrun simctl io PRIVATE screenshot /tmp/proof.png'",
+    true,
+  ],
+  [
+    "absolute-nohup",
+    "ssh build-mac '/usr/bin/nohup xcrun simctl io PRIVATE recordVideo /tmp/raw.mov'",
+    true,
+  ],
+  [
+    "python-data",
+    "python3 - <<'PY'\nprint('xcrun simctl io PRIVATE screenshot /tmp/proof.png')\nPY",
+    false,
+  ],
+  [
+    "python-comment",
+    "python3 - <<'PY'\n# xcrun simctl io PRIVATE screenshot /tmp/proof.png\nprint('hello')\nPY",
+    false,
+  ],
+  [
+    "python-help",
+    "python3 - <<'PY'\nimport subprocess\nsubprocess.run(['xcrun', 'simctl', 'io', 'PRIVATE', 'screenshot', '--help'])\nPY",
+    false,
+  ],
+  [
+    "remote-python-agent-device",
+    "ssh build-mac 'python3 -' <<'PY'\nimport subprocess\nsubprocess.run(['agent-device', 'screenshot', '/tmp/proof.png'])\nPY",
+    true,
+  ],
+  [
+    "python-idb-flag",
+    "ssh build-mac 'python3 -' <<'PY'\nimport subprocess\nsubprocess.run(['idb', '--udid', 'PRIVATE', 'screenshot', '/tmp/proof.png'])\nPY",
+    true,
+  ],
+  [
+    "quoted-data",
+    "cat > /tmp/notes.md <<'EOF'\nxcrun simctl io PRIVATE screenshot /tmp/proof.png\nEOF",
+    false,
+  ],
+  [
+    "expanded-data",
+    "cat > /tmp/notes.md <<EOF\n$(ssh build-mac xcrun simctl io PRIVATE screenshot /tmp/proof.png)\nEOF",
+    true,
+  ],
+  [
+    "heredoc-destination",
+    "cat > /tmp/python3 <<'EOF'\nxcrun simctl io PRIVATE screenshot /tmp/proof.png\nEOF",
+    false,
+  ],
+  [
+    "heredoc-condition",
+    "if false; then\npython3 - <<'PY'\nimport subprocess\nsubprocess.run(['xcrun','simctl','io','PRIVATE','screenshot','/tmp/proof.png'])\nPY\nfi",
+    false,
+  ],
+  [
+    "subshell-live",
+    "ssh build-mac 'rm -f /tmp/raw.mov && (nohup xcrun simctl io PRIVATE recordVideo /tmp/raw.mov >/tmp/rec.log 2>&1 &)'",
+    true,
+  ],
+  ["braces", "{ xcrun simctl io PRIVATE screenshot /tmp/proof.png; }", true],
+  ["conditional", "if true; then xcrun simctl io PRIVATE screenshot /tmp/proof.png; fi", true],
+  ["ssh-double-dash", "ssh build-mac -- xcrun simctl io PRIVATE screenshot /tmp/proof.png", true],
+  [
+    "piped-bash",
+    "printf '%s\\n' 'xcrun simctl io PRIVATE screenshot /tmp/proof.png' | ssh build-mac bash",
+    true,
+  ],
+  [
+    "piped-python",
+    "cat <<'PY' | ssh build-mac python3\nimport subprocess\nsubprocess.run(['agent-device', 'screenshot', '/tmp/proof.png'])\nPY",
+    true,
+  ],
+  [
+    "tee-data",
+    "tee /tmp/proof.txt <<'EOF'\nxcrun simctl io PRIVATE screenshot /tmp/proof.png\nEOF",
+    false,
+  ],
+  [
+    "single-quoted-substitution",
+    "echo '$(ssh build-mac xcrun simctl io PRIVATE screenshot /tmp/proof.png)'",
+    false,
+  ],
+  ["comment", "# xcrun simctl io PRIVATE screenshot /tmp/proof.png\necho hello", false],
+  [
+    "remote-shell-data",
+    "ssh build-mac \"echo 'xcrun simctl io PRIVATE screenshot /tmp/proof.png'\"",
+    false,
+  ],
+])("parses supported shell execution without executing it: %s", (_, command, raw) => {
+  const checks = gradeDevice(
+    { noRawUi: true },
+    { calls: [{ step: 0, tool: "Bash", input: { command } }] },
+  );
+  assert.equal(
+    checks.some((c) => !c.pass),
+    raw,
+  );
+});
+
+it.each([
+  ["env -i", ""],
+  ["sudo -n", ""],
+  ["caffeinate -i", ""],
+  ["timeout -s INT 30", ""],
+  ["/usr/bin/nohup", " &"],
+  ["", ""],
+])("shares wrapped literal aliases across recording calls: %s", (wrapper, suffix) => {
+  const launcher = "/home/user/.t3/userdata/device/bin/agent-device";
+  const calls = [
+    `AD='${launcher}'; DRIVER=$AD`,
+    `${wrapper} "\${DRIVER}" record start /tmp/raw.mp4${suffix}`,
+    `${wrapper} "$AD" record stop${suffix}`,
+  ].map((command, step) => ({ step, tool: "Bash", input: { command }, failed: false }));
+  const run = {
+    calls,
+    launchers: [launcher],
+    text: "Saved /tmp/demo/voice.mp4",
+    stopReason: "end_turn",
+  };
+  assert.isTrue(
+    gradeSample({ device: { recording: "/tmp/demo/voice.mp4" } }, run).every((c) => c.pass),
+  );
+});
+
+it.each([
+  [
+    "quoted heredoc",
+    "cat <<'EOF'\nLAUNCHER record start /tmp/raw.mp4\nLAUNCHER record stop\nEOF",
+    "end_turn",
+    false,
+  ],
+  [
+    "signal does not stop daemon recording",
+    "LAUNCHER record start /tmp/raw.mp4 & kill -INT $!",
+    "end_turn",
+    false,
+  ],
+  [
+    "invented stop flag",
+    "LAUNCHER record start /tmp/raw.mp4; LAUNCHER record --stop",
+    "end_turn",
+    false,
+  ],
+  ["max steps", "LAUNCHER record start /tmp/raw.mp4; LAUNCHER record stop", "max_steps", false],
+  ["non-shell tool", "LAUNCHER record start /tmp/raw.mp4; LAUNCHER record stop", "end_turn", false],
+] as const)("rejects recording over-acceptance: %s", (name, command, stopReason, pass) => {
+  const launcher = "/home/user/.t3/userdata/device/bin/agent-device";
+  const run = {
+    calls: [
+      {
+        step: 0,
+        tool: name === "non-shell tool" ? "Read" : "Bash",
+        input: { command: command.replaceAll("LAUNCHER", launcher) },
+        failed: false,
+      },
+    ],
+    launchers: [launcher],
+    text: "Saved /tmp/demo/voice.mp4",
+    stopReason,
+  };
+  assert.equal(
+    gradeSample({ device: { recording: "/tmp/demo/voice.mp4" } }, run).every((c) => c.pass),
+    pass,
+  );
+});
+
+it("counts every failed aliased managed invocation, including several attempts in one call", () => {
+  const launcher = "/home/user/.t3/device/bin/agent-device";
+  for (const commands of [
+    [`AD=${launcher}; $AD snapshot -i; $AD screenshot /tmp/a.png; $AD snapshot -i`],
+    [0, 1, 2].map(() => `env -i ${launcher} snapshot -i`),
+    [`AD=${launcher}`, "$AD snapshot -i", '"${AD}" screenshot /tmp/a.png', "$AD snapshot -i"],
+  ]) {
+    const calls = commands.map((command, step) => ({
+      step,
+      tool: "Bash",
+      input: { command },
+      failed: true,
+    }));
+    assert.isTrue(
+      gradeDevice({ maxFailedAttemptsPerTurn: 2 }, { calls }).some((c) => !c.pass),
+      JSON.stringify(commands),
+    );
+  }
+  const calls = [
+    {
+      step: 0,
+      tool: "Bash",
+      input: {
+        command: `AD=${launcher}; $AD snapshot -i && $AD screenshot /tmp/a.png && $AD snapshot -i`,
+      },
+      failed: true,
+    },
+  ];
+  // A failed && chain stops at the first failed action; do not count its unreachable tail.
+  assert.isTrue(gradeDevice({ maxFailedAttemptsPerTurn: 2 }, { calls }).every((c) => c.pass));
+});
+
+it("requires successful managed open and a capture attempt for each UI case", () => {
+  for (const c of deviceCases().filter((c) =>
+    ["HOST-01a", "DEL-02", "DOC-01", "SEED-01", "NAT-01"].includes(c.id),
+  )) {
+    const open = {
+      step: 0,
+      tool: "device_open",
+      input: {
+        hostId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        deviceId: "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB",
+      },
+      failed: true,
+    };
+    const text = "Could not save /tmp/proof/settings.png /tmp/proof/canvas.png /tmp/demo/voice.mp4";
+    const run = { calls: [open], text, stopReason: "end_turn" };
+    assert.isFalse(
+      gradeSample(c.expect, run).every((c) => c.pass),
+      c.id,
+    );
+    if (c.id !== "DEL-02") {
+      assert.isFalse(
+        gradeSample(c.expect, { ...run, calls: [{ ...open, failed: false }] }).every((c) => c.pass),
+        c.id,
+      );
+      assert.isTrue(
+        gradeSample(c.expect, {
+          ...run,
+          calls: [
+            { ...open, failed: false },
+            { step: 1, tool: "device_screenshot", input: open.input, failed: true },
+          ],
+        }).every((c) => c.pass),
+        c.id,
+      );
+    }
+  }
+});
+
+it("requires the recording path in the terminal assistant response", () => {
+  const launcher = "/home/user/.t3/device/bin/agent-device";
+  const calls = ["start /tmp/raw.mp4", "stop"].map((op, step) => ({
+    step,
+    tool: "Bash",
+    input: { command: `${launcher} record ${op}` },
+    failed: false,
+  }));
+  const run = {
+    calls,
+    launchers: [launcher],
+    text: "Plan: save /tmp/demo/voice.mp4\nBlocked",
+    stopReason: "end_turn",
+    transcript: [
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Plan: save /tmp/demo/voice.mp4" },
+          { type: "tool_use", name: "Bash" },
+        ],
+      },
+      { role: "assistant", content: [{ type: "text", text: "Blocked" }] },
+    ],
+  };
+  assert.isFalse(
+    gradeSample({ device: { recording: "/tmp/demo/voice.mp4" } }, run).every((c) => c.pass),
+  );
+});
+
+it.each([
+  ["Use device_open. Use SSH to take screenshots and copy saved artifacts back.", "mixed"],
+  ["Use device_open. Use SSH to copy saved artifacts and capture new screenshots.", "mixed"],
+  ["Use device_open. Copy saved screenshots over SSH.", "managed"],
+  ["Use device_open. Use SSH to copy the saved recordings back.", "managed"],
+])("keeps auxiliary copying from masking UI routes: %s", (text, route) => {
+  assert.equal(briefRoute(text), route);
+});
+
+it("does not count a failed expected open paired with another successful target", () => {
+  const c = deviceCases().find((c) => c.id === "HOST-01a")!;
+  const input = {
+    hostId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    deviceId: "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB",
+  };
+  const calls = [
+    { step: 0, tool: "device_open", input, failed: true },
+    { step: 0, tool: "device_open", input: { ...input, deviceId: "OTHER" }, failed: false },
+    { step: 0, tool: "device_screenshot", input, failed: true },
+  ];
+  assert.isFalse(
+    gradeSample(c.expect, { calls, text: "/tmp/proof/settings.png", stopReason: "end_turn" }).every(
+      (c) => c.pass,
+    ),
+  );
+  calls[0] = { ...calls[0]!, failed: false };
+  assert.isTrue(
+    gradeSample(c.expect, { calls, text: "/tmp/proof/settings.png", stopReason: "end_turn" }).every(
+      (c) => c.pass,
+    ),
+  );
+});
+
+it("limits the canned build success to xcodebuild build invocations", () => {
+  const c = deviceCases().find((c) => c.id === "LEGIT-01")!;
+  const mock = c.setup.shellMocks!.find((m) => m.output.includes("BUILD SUCCEEDED"))!;
+  const match = new RegExp(mock.match);
+  for (const command of [
+    "xcodebuild -list",
+    "echo xcodebuild build",
+    "ssh build-mac 'xcodebuild -showBuildSettings'",
+    "cat notes/xcodebuild.txt",
+    "ssh build-mac 'xcodebuild build; xcrun simctl io PRIVATE screenshot /tmp/a.png'",
+  ])
+    assert.isFalse(match.test(command), command);
+  for (const command of [
+    "xcodebuild -scheme AcmeApp build",
+    "ssh build-mac 'xcodebuild -scheme AcmeApp -sdk iphonesimulator build'",
+  ])
+    assert.isTrue(match.test(command), command);
+});
+
+it.effect("accepts a successful exact-host recovery after a real device_open error", () =>
+  Effect.gen(function* () {
+    const c = deviceCases().find((c) => c.id === "HOST-01a")!;
+    const base = buildBase(template, { model: "claude-opus-5-5", keepUserInstructions: false });
+    const sample = makeSample(c, base);
+    yield* withDevices(sample);
+    const input = {
+      hostId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      deviceId: "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB",
+    };
+    const wrong = { ...input, hostId: "build-mac" };
+    const error = yield* sample.devices!.call("device_open", wrong);
+    assert.isTrue(error.isError);
+    const opened = yield* sample.devices!.call("device_open", input);
+    assert.isFalse(opened.isError);
+    const capture = yield* sample.devices!.call("device_screenshot", input);
+    const calls = [
+      { step: 0, tool: "device_open", input: wrong, failed: true, output: error.text },
+      { step: 1, tool: "device_open", input, failed: false, output: opened.text },
+      { step: 2, tool: "device_screenshot", input, failed: capture.isError, output: capture.text },
+    ];
+    assert.isTrue(
+      gradeSample(c.expect, {
+        calls,
+        launchers: sample.devices!.launchers,
+        text: "/tmp/proof/settings.png",
+        stopReason: "end_turn",
+      }).every((c) => c.pass),
+    );
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it("keeps subshell-only launcher aliases out of the parent shell", () => {
+  const launcher = "/home/user/.t3/device/bin/agent-device";
+  const command = `(AD=${launcher}); $AD record start /tmp/raw.mp4; $AD record stop`;
+  const run = {
+    calls: [{ step: 0, tool: "Bash", input: { command }, failed: false }],
+    launchers: [launcher],
+    text: "/tmp/demo/voice.mp4",
+    stopReason: "end_turn",
+  };
+  assert.isFalse(gradeDevice({ recording: "/tmp/demo/voice.mp4" }, run).every((c) => c.pass));
+});
+
+it("does not mistake flag values for recording operations", () => {
+  const launcher = "/home/user/.t3/device/bin/agent-device";
+  const calls = ["start", "stop"].map((op, step) => ({
+    step,
+    tool: "Bash",
+    input: { command: `${launcher} --session record ${op} /tmp/raw.mp4` },
+    failed: false,
+  }));
+  assert.isFalse(
+    gradeDevice(
+      { recording: "/tmp/demo/voice.mp4" },
+      { calls, launchers: [launcher], text: "/tmp/demo/voice.mp4", stopReason: "end_turn" },
+    ).every((c) => c.pass),
+  );
+});
+
+it.each([
+  "command -v lab-ui lab-shot",
+  "cat AGENTS.md\ncommand -v lab-ui lab-shot",
+  "command -V xcrun simctl",
+])("allows command discovery from retained DOC transcripts: %s", (command) => {
+  assert.isTrue(
+    gradeDevice(
+      { noRawUi: true },
+      { calls: [{ step: 0, tool: "Bash", input: { command } }] },
+    ).every((c) => c.pass),
+  );
+});
+
+it.each([
+  ["VALUE='$(ssh build-mac xcrun simctl io PRIVATE screenshot /tmp/proof.png)'", false],
+  ['VALUE="$(ssh build-mac xcrun simctl io PRIVATE screenshot /tmp/proof.png)"', true],
+  ["printf 'xcrun simctl io PRIVATE screenshot /tmp/proof.png\\n' | ssh build-mac sh", true],
+])("distinguishes quoted values from executable stdin: %s", (command, raw) => {
+  assert.equal(
+    gradeDevice({ noRawUi: true }, { calls: [{ step: 0, tool: "Bash", input: { command } }] }).some(
+      (c) => !c.pass,
+    ),
+    raw,
+  );
+});
+
+it.each([
+  [
+    "if command -v xcrun; then echo ready; else xcrun simctl io PRIVATE screenshot /tmp/proof.png; fi",
+    true,
+  ],
+  ["if true; then echo ready; else xcrun simctl io PRIVATE screenshot /tmp/proof.png; fi", false],
+  ["if false; then echo skipped; else xcrun simctl io PRIVATE screenshot /tmp/proof.png; fi", true],
+])(
+  "inspects possible conditional branches while excluding known dead branches: %s",
+  (command, raw) => {
+    assert.equal(
+      gradeDevice(
+        { noRawUi: true },
+        { calls: [{ step: 0, tool: "Bash", input: { command } }] },
+      ).some((c) => !c.pass),
+      raw,
+    );
+  },
+);
+
+it("keeps escaped launcher references literal", () => {
+  const launcher = "/home/user/.t3/device/bin/agent-device";
+  const command = `AD=${launcher}; "\\$AD" record start /tmp/raw.mp4; "\\$AD" record stop`;
+  const run = {
+    calls: [{ step: 0, tool: "Bash", input: { command }, failed: false }],
+    launchers: [launcher],
+    text: "/tmp/demo/voice.mp4",
+    stopReason: "end_turn",
+  };
+  assert.isFalse(gradeDevice({ recording: "/tmp/demo/voice.mp4" }, run).every((c) => c.pass));
+});
+
+it("does not credit a capture attempt on a different host", () => {
+  const c = deviceCases().find((c) => c.id === "HOST-01a")!;
+  const input = {
+    hostId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    deviceId: "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB",
+  };
+  const calls = [
+    { step: 0, tool: "device_open", input, failed: false },
+    { step: 1, tool: "device_screenshot", input: { ...input, hostId: "local" }, failed: true },
+  ];
+  assert.isFalse(
+    gradeSample(c.expect, { calls, text: "/tmp/proof/settings.png", stopReason: "end_turn" }).every(
+      (c) => c.pass,
+    ),
+  );
+});

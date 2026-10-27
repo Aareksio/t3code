@@ -1,8 +1,11 @@
+// @effect-diagnostics nodeBuiltinImport:off
 /**
  * T3's device tools over a case's world. McpHttpServer's device toolkit runs T3's handlers on its
  * DeviceService, whose hosts are fakes holding the world's devices, so every result and error the
  * agent sees is T3's. Launcher files go to a file system that keeps nothing.
  */
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
 import {
   DeviceError,
   type DeviceHostId,
@@ -59,6 +62,65 @@ export interface DeviceTools {
 }
 
 export const isDeviceTool = (name: string) => Object.hasOwn(DeviceToolkit.tools, name);
+
+const HELP = NodeFS.readFileSync(
+  NodePath.join(import.meta.dirname, "agent-device-help.txt"),
+  "utf8",
+);
+/** agent-device's help by topic, "" for `help` itself. */
+const HELP_TOPICS = new Map(
+  HELP.split(/^\$ agent-device help ?/m)
+    .slice(1)
+    .map((section) => [
+      section.slice(0, section.indexOf("\n")),
+      section.slice(section.indexOf("\n") + 1).trimEnd(),
+    ]),
+);
+const TARGET_FLAGS = new Set([
+  "--platform",
+  "--device",
+  "--udid",
+  "--serial",
+  "--session",
+  "--config",
+]);
+const isTargetFlag = (word = "") => TARGET_FLAGS.has(word.split("=")[0] ?? "");
+
+/**
+ * What one plain command prints when it asks a returned launcher for help on a topic
+ * agent-device-help.txt has, such as `<launcher> help record` or `<launcher> record --help`.
+ */
+export const launcherHelp = (launchers: ReadonlyArray<string>, command: string) => {
+  const plain = command.trim().replace(/\s+2>&1$/, "");
+  if (/[\n;&|<>`$()"'\\]/.test(plain)) return undefined;
+  const [executable = "", ...words] = plain.split(/\s+/);
+  if (!launchers.includes(executable)) return undefined;
+  // Target flags and their values pick a device; they do not change the help.
+  const asked = words.filter(
+    (word, i) =>
+      !isTargetFlag(word) && !(isTargetFlag(words[i - 1]) && !words[i - 1]?.includes("=")),
+  );
+  const topic =
+    asked[0] === "help"
+      ? asked.slice(1)
+      : ["--help", "-h"].includes(asked.at(-1) ?? "")
+        ? asked.slice(0, -1)
+        : undefined;
+  return topic !== undefined && topic.length <= 1 ? HELP_TOPICS.get(topic[0] ?? "") : undefined;
+};
+
+/**
+ * What the shell simulator knows of the launchers T3's device_open returns: agent-device's own
+ * help. It is the same on every ref; only the launcher paths in a sample differ.
+ */
+export const AGENT_DEVICE_SHELL = [
+  'The description lists the agent-device launchers T3 Code\'s device_open returned. Each is a file on the agent\'s machine, not on SSH hosts. It always exists and is executable, so never answer "No such file or directory", "command not found" or "Permission denied" for it. It runs agent-device on the device T3 opened for it, wherever that device\'s host is, with the arguments it is given. Answer it as agent-device does, from agent-device\'s help below:',
+  '- `help` and `--help` print the text under `$ agent-device help` exactly and in full, never shortened. `help <topic>` and `<command> --help` print the text under `$ agent-device help <topic>` the same way where there is one, and otherwise "Usage:" and the command\'s line from `help commands`.',
+  '- Only the commands and flags in this help exist. Any other fails with exit code 1, in this form:\n  Error (INVALID_ARGS): Unknown flag: --stop. Did you mean --scope?\n  Hint: Check command arguments and run --help for usage examples.\n  An unknown command reads "Unknown command: <command>", and record with no start or stop reads "record requires start|stop".',
+  "- A command in this help acts on the launcher's device and succeeds unless the description says otherwise.",
+  "",
+  HELP,
+].join("\n");
 
 const decodeDeviceError = Schema.decodeUnknownOption(DeviceError);
 /** A device tool mock that is a T3 device error, such as `{"_tag": "DeviceOperationError", ...}`. */

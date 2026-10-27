@@ -48,7 +48,14 @@ import {
 } from "../../apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import { changeRequestsCreatedBy } from "../../apps/server/src/orchestration-v2/PullRequestSyncReactor.ts";
 import { DeviceExpect, gradeDevice } from "./device-grading.ts";
-import { deviceFailure, type DeviceTools, isDeviceTool, makeDeviceTools } from "./devices.ts";
+import {
+  AGENT_DEVICE_SHELL,
+  deviceFailure,
+  type DeviceTools,
+  isDeviceTool,
+  launcherHelp,
+  makeDeviceTools,
+} from "./devices.ts";
 /** Agent models by id, with the display name a harness gives them. */
 const MODELS = {
   "claude-sonnet-5-5": "Sonnet 5.5",
@@ -98,6 +105,8 @@ export type SampleRun = {
   readonly calls: ReadonlyArray<Call>;
   text: string;
   stopReason: string;
+  /** The agent's final answer: its last response's text, if it ended its turn. */
+  readonly finalText?: string;
   /** PRs linked to the thread when the sample ends, by the agent or by T3. */
   readonly linked?: ReadonlyArray<string>;
   /** The `agent-device` commands T3's device_open returned, prior turns included. */
@@ -762,10 +771,6 @@ export const buildMessages = (sample: Sample) => {
     native
       ? "You are a subagent started by the parent agent's Agent tool. Your final message goes to the parent agent, not to the user."
       : undefined,
-    // Claude Code passes a hook's additional context to the subagent as a reminder.
-    native && base.subagentContext
-      ? `SubagentStart hook additional context: ${base.subagentContext}`
-      : undefined,
     context,
   ];
   const reminders = base.reminders.toSpliced(base.gitStatusAt, 0, reminder(gitStatus(testCase)));
@@ -806,6 +811,10 @@ export const buildMessages = (sample: Sample) => {
   const { prompt } = testCase;
   const childPrompt = () => taskPrompt({ task: prompt, role: delegateRole });
   push("user", text(role === "delegated-child" ? childPrompt() : prompt));
+  // Claude Code gives a subagent its SubagentStart hooks' context as a reminder after the task.
+  if (native && base.subagentContext) {
+    push("user", reminder(`SubagentStart hook additional context: ${base.subagentContext}`));
+  }
   return messages;
 };
 
@@ -1055,15 +1064,19 @@ const callText = ({ tool, input }: Omit<ShellEntry, "output">) =>
 
 /** The simulator's request: the machine, this sample's earlier calls, then the new call. */
 export const shellRequest = (sample: Sample, call: Omit<ShellEntry, "output">, model: string) => {
-  const { testCase, base, repo, shell } = sample;
+  const { testCase, base, repo, shell, devices } = sample;
   const { world, context, shellMocks = [] } = testCase.setup;
   const { cwd, platform, date } = base.environment;
+  const launchers = [...new Set(devices?.launchers)];
   const machine = [
     `Working directory: ${cwd} on ${platform}, a git checkout of github.com/${repo}.${date ? ` Today is ${date}.` : ""}`,
     gitStatus(testCase),
     `World: ${valueText(world ?? {})}`,
     ...(shellMocks.length > 0
       ? [`Commands that match these regexes print exactly this output: ${valueText(shellMocks)}`]
+      : []),
+    ...(launchers.length > 0
+      ? [`agent-device launchers T3's device_open returned: ${launchers.join(", ")}`]
       : []),
     ...(context ? [`The agent was told: ${context}`] : []),
     `The agent's task: ${testCase.prompt}`,
@@ -1074,7 +1087,8 @@ export const shellRequest = (sample: Sample, call: Omit<ShellEntry, "output">, m
     max_tokens: 8_000,
     // The "facts" field keeps the simulator's reasoning out of the output the agent sees.
     output_config: { effort: "low", format: { type: "json_schema", schema: SHELL_REPLY_SCHEMA } },
-    system: SHELL_PROMPT,
+    // A case with devices also gets agent-device's own CLI, so T3's launchers answer as it does.
+    system: devices ? `${SHELL_PROMPT}\n\n${AGENT_DEVICE_SHELL}` : SHELL_PROMPT,
     messages: [
       {
         role: "user",
@@ -1111,14 +1125,20 @@ type Config = {
   readonly shellModel: PricedModel;
 };
 
-/** Output for a shell, file, or web tool: a matching shell mock, else the shell simulator. */
+/**
+ * Output for a shell, file, or web tool: a matching shell mock, agent-device's help for a
+ * launcher T3 returned, else the shell simulator.
+ */
 const simulate = Effect.fn("evaluateMcpToolUse.simulate")(function* (
   sample: Sample,
   config: Config,
   call: Omit<ShellEntry, "output">,
 ) {
   const command = call.tool === "Bash" && isRecord(call.input) ? call.input.command : undefined;
-  let output = typeof command === "string" ? mockOutput(sample, command) : undefined;
+  let output =
+    typeof command === "string"
+      ? (mockOutput(sample, command) ?? launcherHelp(sample.devices?.launchers ?? [], command))
+      : undefined;
   if (output === undefined) {
     const body = shellRequest(sample, call, config.shellModel);
     const response = yield* callModel(
@@ -1282,49 +1302,7 @@ export const gradeSample = (expect: McpToolUseCase["expect"], run: SampleRun) =>
   const isLinked = (url: string) => (run.linked ?? []).some((at) => matches(url, at));
   for (const url of expect.linked ?? []) add(`linked ${url}`, isLinked(url));
   checks.push(...gradeDevice(expect.device, run));
-  const recording = expect.device?.recording;
-  if (recording !== undefined) add(`device recording ${recording}`, recorded(run, recording));
   return checks;
-};
-
-/** The words of each simple command in a shell command line, unquoted. */
-const shellCommands = (command: string) => {
-  const commands: Array<Array<string>> = [[]];
-  for (const word of command.match(/"(?:\\.|[^"\\])*"|'[^']*'|&&|\|\||[;|\n]|[^\s;&|]+/g) ?? []) {
-    if (/^(?:&&|\|\||[;|\n])$/.test(word)) commands.push([]);
-    else commands.at(-1)?.push(/^["']/.test(word) ? word.slice(1, -1) : word);
-  }
-  return commands;
-};
-
-/**
- * Shell calls that did not fail ran a command T3's device_open returned to start a recording,
- * then to stop it, and the agent's text names the file. Replay has no bytes to check.
- */
-const recorded = (run: SampleRun, path: string) => {
-  const steps = run.calls.flatMap((call) => {
-    if (call.failed || !isRecord(call.input) || typeof call.input.command !== "string") return [];
-    // `AD=<returned command>; "$AD" record start` runs the returned command too.
-    const vars = new Map<string, string>();
-    return shellCommands(call.input.command).flatMap((words) => {
-      const at = words.findIndex((w) => !/^\w+=/.test(w));
-      if (at === -1) {
-        for (const w of words) vars.set(w.slice(0, w.indexOf("=")), w.slice(w.indexOf("=") + 1));
-        return [];
-      }
-      // Variable assignments may lead; the executable itself must be a returned command.
-      const [first = "", ...args] = words.slice(at);
-      const executable = first.replace(
-        /^\$\{?(\w+)\}?$/,
-        (ref, name: string) => vars.get(name) ?? ref,
-      );
-      const step = args[args.indexOf("record") + 1];
-      const launched = (run.launchers ?? []).includes(executable) && args.includes("record");
-      return launched && (step === "start" || step === "stop") ? [step] : [];
-    });
-  });
-  const started = steps.indexOf("start");
-  return started !== -1 && steps.indexOf("stop", started) !== -1 && run.text.includes(path);
 };
 
 // Checks that can only go from pass to fail as a sample goes on.
@@ -1497,6 +1475,12 @@ print(json.dumps({'url': p['base_url'].rstrip('/'), 'headers': h}))
     ),
   );
 
+// Concurrent runs share an organization's rate limits. Backing off for up to about 4 minutes
+// lets a sample wait out a busy spell, with jitter so samples do not retry in step.
+const RETRY = Schedule.min([Schedule.exponential("2 seconds"), Schedule.spaced("1 minute")]).pipe(
+  Schedule.jittered,
+);
+
 const postModel = Effect.fn("evaluateMcpToolUse.postModel")(function* (
   apiKey: string,
   body: unknown,
@@ -1504,10 +1488,14 @@ const postModel = Effect.fn("evaluateMcpToolUse.postModel")(function* (
   responses = false,
 ) {
   const client = (yield* HttpClient.HttpClient).pipe(
+    // Anthropic answers 529 when it is overloaded; retryTransient already retries 429 and 5xx.
+    HttpClient.filterStatus((status) => status !== 529),
     HttpClient.retryTransient({
       retryOn: "errors-and-responses",
-      schedule: Schedule.exponential("2 seconds"),
-      times: 4,
+      while: (error) =>
+        error.reason._tag === "StatusCodeError" && error.reason.response.status === 529,
+      schedule: RETRY,
+      times: 8,
     }),
   );
   const response = yield* HttpClientRequest.post(
@@ -1568,14 +1556,15 @@ export const ranCalls = (
 
 /**
  * Runs one sample until the model ends its turn, uses up its steps, or fails a check that no
- * later step can undo.
+ * later step can undo. Tokens add up in `spent`, so a sample that errors still reports them.
  */
 const runSample = Effect.fn("evaluateMcpToolUse.runSample")(function* (
   testCase: McpToolUseCase,
   config: Config,
   base: Base,
+  spent: { readonly usage: Usage; readonly shellUsage: Usage },
 ) {
-  const sample = makeSample(testCase, base);
+  const sample = { ...makeSample(testCase, base), shellUsage: spent.shellUsage };
   yield* withDevices(sample);
   const runPromise = Effect.runPromiseWith(yield* Effect.context<HttpClient.HttpClient>());
   const messages = buildMessages(sample);
@@ -1584,8 +1573,9 @@ const runSample = Effect.fn("evaluateMcpToolUse.runSample")(function* (
   const start = messages.length;
   const calls: Array<Call> = [];
   const said: Array<string> = [];
-  const usage = emptyUsage();
+  const { usage } = spent;
   let stopReason = "max_steps";
+  let finalText = "";
   // Codex's code-mode cells take more model calls, so a case's own budget grows for it too.
   const extra = isCodex(config.model) ? 4 : 0;
   const maxSteps = testCase.maxSteps === undefined ? config.maxSteps : testCase.maxSteps + extra;
@@ -1599,11 +1589,13 @@ const runSample = Effect.fn("evaluateMcpToolUse.runSample")(function* (
       transcript.push(...response.raw);
     }
     messages.push({ role: "assistant", content: response.content });
-    said.push(...response.content.filter(isText).map((block) => block.text));
+    const texts = response.content.filter(isText).map((block) => block.text);
+    said.push(...texts);
     const uses = response.content.filter(isToolUse);
     calls.push(...ranCalls(sample, step, uses));
     if (response.stop_reason !== "tool_use") {
       stopReason = response.stop_reason ?? "unknown";
+      finalText = texts.join("\n\n");
       break;
     }
     if (failedEarly(testCase.expect, { calls, text: said.join("\n\n"), stopReason })) {
@@ -1682,6 +1674,7 @@ const runSample = Effect.fn("evaluateMcpToolUse.runSample")(function* (
     calls,
     text: said.join("\n\n"),
     stopReason,
+    finalText,
     linked: [...sample.linked],
     ...(sample.devices ? { launchers: [...sample.devices.launchers] } : {}),
     usage,
@@ -1693,13 +1686,20 @@ const runSample = Effect.fn("evaluateMcpToolUse.runSample")(function* (
 type ResultRow = Pick<McpToolUseCase, "id" | "kind" | "pattern"> & {
   readonly role: string;
   readonly pass: boolean;
+  /** Set when the sample could not run to the end, even after retries. It is not graded. */
+  readonly error?: string;
   readonly usage: Usage;
   readonly shellUsage: Usage;
 };
 
-const passRate = (rows: ReadonlyArray<{ readonly pass: boolean }>) =>
-  rows.filter((row) => row.pass).length / rows.length;
-const percent = (rate: number) => `${Math.round(rate * 100)}%`;
+/** The share of samples that passed. Samples that errored are left out: NaN if all did. */
+const passRate = (
+  rows: ReadonlyArray<{ readonly pass: boolean; readonly error?: string | undefined }>,
+) => {
+  const finished = rows.filter((row) => row.error === undefined);
+  return finished.filter((row) => row.pass).length / finished.length;
+};
+const percent = (rate: number) => (Number.isNaN(rate) ? "-" : `${Math.round(rate * 100)}%`);
 const groups = <A>(rows: ReadonlyArray<A>, key: (row: A) => string) =>
   [...Map.groupBy(rows, key)].toSorted(([left], [right]) => left.localeCompare(right));
 
@@ -1713,7 +1713,7 @@ const spend = (usages: ReadonlyArray<Usage>, model: PricedModel | undefined) => 
 };
 
 /** Markdown report. With a baseline, each case shows its earlier pass rate and the change. */
-const summarize = (
+export const summarize = (
   rows: Array<ResultRow>,
   options: { readonly header: string; readonly shellModel: PricedModel; readonly model: Model },
   before?: Map<string, number>,
@@ -1735,19 +1735,30 @@ const summarize = (
     ...groups(rows, key).map(([group, members]) => {
       const now = passRate(members);
       const was = before?.get(group);
+      const errored = members.filter((row) => row.error !== undefined).length;
       const delta =
-        was === undefined ? "new | |" : `${percent(was)} | ${Math.round((now - was) * 100)} pts |`;
-      return `| ${group} | ${percent(now)} of ${members.length} |${compare ? ` ${delta}` : ""}`;
+        was === undefined
+          ? "new | |"
+          : `${percent(was)} | ${Number.isNaN(now) ? "" : `${Math.round((now - was) * 100)} pts`} |`;
+      const pass = `${percent(now)} of ${members.length - errored}${errored > 0 ? `, ${errored} errored` : ""}`;
+      return `| ${group} | ${pass} |${compare ? ` ${delta}` : ""}`;
     }),
     "",
   ];
+  const errors = groups(
+    rows.filter((row) => row.error !== undefined),
+    (row) => row.id,
+  );
+  const errorNote = `- Errored: ${errors.map(([id, failed]) => `${id} ×${failed.length}`).join(", ")}. These samples did not finish, even after retries, so pass rates leave them out; tokens they spent are counted.`;
   const nativeNote =
-    "- native-subagent cases are approximate: the harness gives subagents their own system prompt, which this runner does not rebuild. T3's append is left out and its SubagentStart hook context added.";
+    "- native-subagent cases are approximate: the harness gives subagents their own system prompt, which this runner does not rebuild. T3's append is left out and its SubagentStart hook context added after the task.";
   const identityNote = `- The captured Claude Code identity line is replaced with "${NEUTRAL_IDENTITY}"`;
+  const finished = rows.filter((row) => row.error === undefined).length;
   return [
     "# MCP tool-use eval\n",
     `- ${options.header}`,
-    `- Pass: ${percent(passRate(rows))} of ${rows.length} samples. Samples that failed to run count as failures.`,
+    `- Pass: ${percent(passRate(rows))} of ${finished} samples.`,
+    ...(errors.length > 0 ? [errorNote] : []),
     codex
       ? "- Cost: not applicable (subscription through proxy)."
       : `- Estimated cost $${cost.toFixed(2)}, $${(cost / rows.length).toFixed(3)} per sample.`,
@@ -1794,7 +1805,13 @@ const decodeCapture = Schema.decodeUnknownEffect(Schema.fromJsonString(Capture))
 const decodeCodexCapture = Schema.decodeUnknownEffect(Schema.fromJsonString(CodexCapture));
 const decodeCase = Schema.decodeUnknownEffect(Schema.fromJsonString(McpToolUseCase));
 const decodeBaselineRow = Schema.decodeUnknownEffect(
-  Schema.fromJsonString(Schema.Struct({ id: Schema.String, pass: Schema.Boolean })),
+  Schema.fromJsonString(
+    Schema.Struct({
+      id: Schema.String,
+      pass: Schema.Boolean,
+      error: Schema.optional(Schema.String),
+    }),
+  ),
 );
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 const string = { type: "string" } as const;
@@ -1936,7 +1953,11 @@ const main = Effect.gen(function* () {
   };
   const previous =
     flags.baseline === undefined ? [] : yield* readJsonl(flags.baseline, decodeBaselineRow);
-  const baseline = new Map(groups(previous, (row) => row.id).map(([id, r]) => [id, passRate(r)]));
+  const baseline = new Map(
+    groups(previous, (row) => row.id)
+      .map(([id, r]) => [id, passRate(r)] as const)
+      .filter(([, rate]) => !Number.isNaN(rate)),
+  );
   // Only a case that passed every baseline sample can stop a run; flaky ones are just reported.
   const passedBefore = (id: string) => baseline.get(id) === 1;
   // Before the paid runs, so a missing git cannot lose their results.
@@ -1953,9 +1974,10 @@ const main = Effect.gen(function* () {
     const privateValues = [config.apiKey, ...Object.values(config.proxy?.headers ?? {})]
       .flatMap((value) => [value, value.replace(/^Bearer /i, "")])
       .filter(Boolean);
-    return runSample(testCase, config, baseFor(testCase)).pipe(
+    return runSample(testCase, config, baseFor(testCase), usage).pipe(
       inFlight.withPermits(1),
       Effect.matchCause({
+        // Not graded: a sample that errors is left out of pass rates, with its tokens so far.
         onFailure: (cause) => ({
           ...identity,
           ...usage,
@@ -1970,7 +1992,9 @@ const main = Effect.gen(function* () {
           return { ...identity, pass: checks.every((check) => check.pass), checks, ...sample };
         },
       }),
-      Effect.tap((row) => Effect.log(`${row.id}: ${row.pass ? "pass" : "FAIL"}`)),
+      Effect.tap((row) =>
+        Effect.log(`${row.id}: ${"error" in row ? "ERROR" : row.pass ? "pass" : "FAIL"}`),
+      ),
     );
   };
   // Without --samples, a case whose 2 samples disagree gets a 3rd to settle it.
@@ -1996,7 +2020,8 @@ const main = Effect.gen(function* () {
       runCase(testCase).pipe(
         Effect.flatMap((caseRows) => {
           rows.push(...caseRows);
-          if (!stopEarly || !passedBefore(testCase.id) || passRate(caseRows) > 0.5) {
+          // A case whose samples all errored has no rate, so it is no regression either.
+          if (!stopEarly || !passedBefore(testCase.id) || !(passRate(caseRows) <= 0.5)) {
             return Effect.void;
           }
           regressions.push(testCase.id);

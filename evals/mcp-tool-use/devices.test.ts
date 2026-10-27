@@ -6,12 +6,13 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
-import { deviceFailure, makeDeviceTools } from "./devices.ts";
+import { AGENT_DEVICE_SHELL, deviceFailure, launcherHelp, makeDeviceTools } from "./devices.ts";
 import {
   buildBase,
   buildMessages,
   makeSample,
   McpToolUseCase,
+  shellRequest,
   t3SubagentContext,
   t3SystemAppend,
   withDevices,
@@ -136,13 +137,80 @@ it.effect("gives a native subagent T3's SubagentStart context instead of T3's ap
       blocks.map((block) => String(block.text)).join("");
     assert.include(system(base.system), t3SystemAppend(model));
     assert.notInclude(system(native.system), t3SystemAppend(model));
-    const [first] = buildMessages(makeSample(deviceCase({ role: "native-subagent" }), native));
-    const reminders = first?.content.map((block) => String(block.text)).join("\n") ?? "";
+    const testCase = deviceCase({ role: "native-subagent" });
+    const shown = (sample: typeof native) =>
+      buildMessages(makeSample(testCase, sample))[0]?.content.map((block) => String(block.text));
+    const reminders = shown(native)?.join("\n") ?? "";
     // A ref without T3's hook gives the subagent nothing.
     assert.equal(
       reminders.includes("SubagentStart hook additional context"),
       subagentContext !== "",
     );
     assert.include(reminders, subagentContext);
+    // Claude Code 2.1.310 records the hook's context after the task, and sends it that way.
+    const blocks = shown({ ...native, subagentContext: "## T3 Code devices" }) ?? [];
+    assert.equal(blocks.at(-2), testCase.prompt);
+    assert.equal(
+      blocks.at(-1),
+      "<system-reminder>\nSubagentStart hook additional context: ## T3 Code devices\n</system-reminder>",
+    );
   }),
 );
+
+it.effect("tells the shell simulator the launchers T3 returned and agent-device's real CLI", () =>
+  Effect.gen(function* () {
+    const sample = makeSample(deviceCase({}), base);
+    yield* withDevices(sample);
+    const call = { tool: "Bash", input: { command: "ls /tmp" } };
+    const told = (request: ReturnType<typeof shellRequest>) => JSON.stringify(request.messages);
+    assert.notInclude(told(shellRequest(sample, call, "claude-haiku-5-5")), "launchers T3's");
+    const opened = yield* sample.devices!.call("device_open", { hostId: MAC, deviceId: IPHONE });
+    const { command } = json(opened.text).agentDevice;
+    const request = shellRequest(sample, call, "claude-haiku-5-5");
+    assert.include(told(request), `agent-device launchers T3's device_open returned: ${command}`);
+    // agent-device's own syntax: a positional recording path, and `record stop` with no flag.
+    assert.include(request.system, AGENT_DEVICE_SHELL);
+    assert.include(
+      request.system,
+      "agent-device record start [path] [--scope <app|device|system>]",
+    );
+    assert.include(request.system, "| record stop |");
+    assert.include(request.system, "Unknown flag: --stop. Did you mean --scope?");
+    // A case without devices keeps the shell prompt every other case has.
+    const plain = makeSample(deviceCase({ world: {} }), base);
+    assert.notInclude(shellRequest(plain, call, "claude-haiku-5-5").system, "agent-device");
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it("prints agent-device's own help for a lone help command on a returned launcher", () => {
+  const help = (topic: string) =>
+    AGENT_DEVICE_SHELL.split(`$ agent-device help${topic ? ` ${topic}` : ""}\n`)[1]
+      ?.split("\n$ agent-device help")[0]
+      ?.trimEnd();
+  // Commands from the paired runs. The simulator once answered the first with a placeholder.
+  const launcher = "/home/user/.t3/userdata/device/bin/agent-device";
+  const target = `--platform ios --udid ${IPHONE} --config /home/user/.t3/userdata/device/hosts/303617b9730210ef3c86c52d.json --session t3-4c43aa31e607633b85e9ff2f`;
+  const asked = (command: string) => launcherHelp([launcher], command);
+  assert.match(help("") ?? "", /^agent-device <command> \[args\] \[--json\]\n/);
+  assert.equal(asked(`${launcher} help ${target}`), help(""));
+  assert.equal(asked(`${launcher} record --help ${target}`), help("record"));
+  assert.equal(asked(`${launcher} help open ${target}`), help("open"));
+  assert.equal(asked(`${launcher} --help 2>&1`), help(""));
+  assert.equal(asked(`${launcher} help settings --session=t3-1`), help("settings"));
+  // Anything else stays with the simulator: other topics, pipes, aliases, other commands.
+  assert.isUndefined(asked(`${launcher} metro --help ${target}`));
+  assert.isUndefined(asked(`${launcher} help record 2>&1 | head -40`));
+  assert.isUndefined(asked(`AD=${launcher}; $AD help record`));
+  assert.isUndefined(asked(`${launcher} snapshot -i ${target}`));
+  assert.isUndefined(asked(`/usr/local/bin/agent-device help`));
+});
+
+it("pins agent-device's help to the version T3 installs", () => {
+  const versions = JSON.parse(
+    NodeFS.readFileSync(
+      new URL("../../apps/server/src/device/deviceToolVersions.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.include(AGENT_DEVICE_SHELL, `agent-device ${versions["agent-device"]} prints this help`);
+});

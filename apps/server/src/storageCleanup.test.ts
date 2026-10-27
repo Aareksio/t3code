@@ -944,6 +944,7 @@ describe("deleted thread worktrees", () => {
     fixture: Effect.Success<ReturnType<typeof cleanupFixture>>,
     threadId: ThreadId,
     beforeStop: Effect.Effect<void> = Effect.void,
+    cwd = fixture.worktree,
   ) =>
     Effect.gen(function* () {
       const startupSwept = yield* Deferred.make<void>();
@@ -958,7 +959,7 @@ describe("deleted thread worktrees", () => {
           driver: ProviderDriverKind.make("codex"),
           providerInstanceId: ProviderInstanceId.make("codex"),
           status: "stopped",
-          cwd: fixture.worktree,
+          cwd,
           model: null,
           capabilities: CodexProviderCapabilitiesV2,
           createdAt: at(-DAY_MS),
@@ -1095,7 +1096,7 @@ describe("deleted thread worktrees", () => {
   );
 
   it.effect(
-    "retries a deleted thread's worktree kept for another reason once a session in it stops",
+    "retries a deleted thread's worktree kept for another reason when a session in it stops",
     () =>
       Effect.gen(function* () {
         yield* TestClock.setTime(NOW_MS);
@@ -1107,7 +1108,6 @@ describe("deleted thread worktrees", () => {
         const owner = parent(fixture.worktree);
         fixture.setDeletedThreads([owner]);
         fixture.setThreads([]);
-        fixture.setOpenSessionCwd(fixture.worktree);
         yield* fixture.fs.writeFileString(`${fixture.worktree}/tracked.txt`, "agent edit\n");
         const reads = yield* stopSessionAfterStartupSweep(
           fixture,
@@ -1121,12 +1121,33 @@ describe("deleted thread worktrees", () => {
             yield* fixture.fs
               .writeFileString(`${fixture.worktree}/tracked.txt`, "original\n")
               .pipe(Effect.orDie);
-            fixture.setSessionLive(false);
           }),
         );
         expect(reads).toBeGreaterThan(0);
         expect(yield* fixture.fs.exists(fixture.worktree)).toBe(false);
       }).pipe(Effect.provide(cleanupTestLayer), Effect.scoped),
+  );
+
+  it.effect("does not sweep for a kept deleted worktree when a session elsewhere stops", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(NOW_MS);
+      const fixture = yield* cleanupFixture({
+        ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+        worktreeAfterDays: null,
+        worktreeOnDelete: true,
+      });
+      fixture.setDeletedThreads([parent(fixture.worktree)]);
+      fixture.setThreads([]);
+      yield* fixture.fs.writeFileString(`${fixture.worktree}/tracked.txt`, "agent edit\n");
+      const reads = yield* stopSessionAfterStartupSweep(
+        fixture,
+        ThreadId.make("thread-elsewhere"),
+        Effect.void,
+        fixture.repo,
+      );
+      expect(reads).toBe(0);
+      expect(yield* fixture.fs.exists(fixture.worktree)).toBe(true);
+    }).pipe(Effect.provide(cleanupTestLayer), Effect.scoped),
   );
 
   it.effect("waits out the settle grace of a subagent that just settled", () =>

@@ -700,35 +700,15 @@ const make = Effect.gen(function* () {
       });
   });
 
-  // Sessions can outlive their run and can be shared across app threads.
-  const liveSessionInside = Effect.fnUntraced(function* (worktreePaths: ReadonlyArray<string>) {
-    const sessionRows = yield* sql<{ payload_json: string }>`
-      SELECT payload_json FROM orchestration_v2_projection_provider_sessions
-      WHERE status != 'stopped'
-    `.pipe(NodeSqliteClient.readOnly);
-    const sessions = yield* Effect.forEach(sessionRows, (row) =>
-      decodeCleanupSession(row.payload_json),
-    );
-    // Ready persisted sessions may have released their runtime; only live sessions protect the path.
-    for (const session of sessions) {
-      const cwd = path.resolve(session.cwd);
-      if (
-        worktreePaths.some((worktreePath) => cwd === worktreePath || inside(worktreePath, cwd)) &&
-        (yield* providerSessions.isLive(session.id))
-      )
-        return true;
-    }
-    return false;
-  });
-
   const cleanWorktrees = Effect.fn("StorageCleanup.cleanWorktrees")(function* (
     serverSettings: ServerSettings,
     now: number,
     entries: StorageCleanupReportEntry[],
   ) {
-    if (!anyWorktreePolicy(serverSettings, worktreeCleanupEnabled)) return false;
+    if (!anyWorktreePolicy(serverSettings, worktreeCleanupEnabled))
+      return { waiting: false, kept: [] };
     let waiting = false;
-    const keptDeleted: string[] = [];
+    const kept: string[] = [];
     const roots: Array<string> = [];
     for (const directory of managedWorktreesDirectories(
       serverSettings,
@@ -803,7 +783,7 @@ const make = Effect.gen(function* () {
         files: null,
       };
       const keep = (reason: string) => {
-        if (deleted && settings.worktreeOnDelete) keptDeleted.push(worktreePath);
+        if (deleted && settings.worktreeOnDelete) kept.push(worktreePath);
         entries.push({ ...entry, reason: sentence(reason) });
       };
       // Reasons a provider session stop or finished deletion work can clear.
@@ -992,8 +972,23 @@ const make = Effect.gen(function* () {
             })
           )
             return waitForStop("thread activity or shared worktree changed since check");
-          if (yield* liveSessionInside([worktreePath]))
-            return waitForStop("provider session is still open");
+          // Sessions can outlive their run and can be shared across app threads.
+          const sessionRows = yield* sql<{ payload_json: string }>`
+            SELECT payload_json FROM orchestration_v2_projection_provider_sessions
+            WHERE status != 'stopped'
+          `.pipe(NodeSqliteClient.readOnly);
+          const sessions = yield* Effect.forEach(sessionRows, (row) =>
+            decodeCleanupSession(row.payload_json),
+          );
+          // Ready persisted sessions may have released their runtime; only live sessions protect the path.
+          for (const session of sessions) {
+            const cwd = path.resolve(session.cwd);
+            if (
+              (cwd === worktreePath || inside(worktreePath, cwd)) &&
+              (yield* providerSessions.isLive(session.id))
+            )
+              return waitForStop("provider session is still open");
+          }
           return null;
         });
         const blocked = yield* blockedSinceCheck();
@@ -1065,8 +1060,7 @@ const make = Effect.gen(function* () {
       yield* projectStore.list({ includeDeleted: true }),
       entries,
     );
-    // Any other keep can change once a session working in that worktree stops.
-    return waiting || (keptDeleted.length > 0 && (yield* liveSessionInside(keptDeleted)));
+    return { waiting, kept };
   });
 
   const cleanFiles = Effect.fn("StorageCleanup.cleanFiles")(function* (
@@ -1106,8 +1100,10 @@ const make = Effect.gen(function* () {
   });
 
   const reportRef = yield* SubscriptionRef.make<StorageCleanupReport | null>(null);
-  // Only deleted threads' worktrees wait on session stops; a deletion stays pending until a sweep that started after it finishes.
+  // Only deleted threads' worktrees wait on session stops: any stop while one waits, or a stop inside one kept for another reason.
+  // A deletion stays pending until a sweep that started after it finishes.
   let deletedWorktreeWaits = true;
+  let keptDeletedWorktrees: ReadonlyArray<string> = [];
   let deletions = 0;
   let sweptDeletions = 0;
   const sweep = Effect.fn("StorageCleanup.sweep")(function* (
@@ -1118,7 +1114,7 @@ const make = Effect.gen(function* () {
     const serverSettings = yield* settingsService.getSettings;
     const settings = serverSettings.storageCleanup;
     const entries: StorageCleanupReportEntry[] = [];
-    deletedWorktreeWaits = yield* cleanWorktrees(serverSettings, now, entries).pipe(
+    const deletedWorktrees = yield* cleanWorktrees(serverSettings, now, entries).pipe(
       Effect.catch((error) =>
         Effect.gen(function* () {
           entries.push({
@@ -1133,10 +1129,12 @@ const make = Effect.gen(function* () {
             files: null,
           });
           yield* Effect.logWarning("worktree cleanup failed", { error });
-          return true;
+          return { waiting: true, kept: [] };
         }),
       ),
     );
+    deletedWorktreeWaits = deletedWorktrees.waiting;
+    keptDeletedWorktrees = deletedWorktrees.kept;
     sweptDeletions = deletionsAtStart;
     for (const category of [
       {
@@ -1283,7 +1281,12 @@ const make = Effect.gen(function* () {
         return (event.type === "thread.deleted" ||
           (event.type === "provider-session.updated" &&
             (event.payload.status === "stopped" || event.payload.status === "error") &&
-            (deletedWorktreeWaits || deletions !== sweptDeletions))) &&
+            (deletedWorktreeWaits ||
+              deletions !== sweptDeletions ||
+              keptDeletedWorktrees.some((worktreePath) => {
+                const cwd = path.resolve(event.payload.cwd);
+                return cwd === worktreePath || inside(worktreePath, cwd);
+              })))) &&
           anyWorktreePolicy(lastSettings, (rules) => rules.worktreeOnDelete)
           ? requestSweep
           : Effect.void;

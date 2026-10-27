@@ -1285,6 +1285,18 @@ it.each([
     true,
   ],
   [
+    "a pipe into `cat` hides an agent-device error",
+    "record start /tmp/demo/voice.mp4 | cat",
+    "Error (COMMAND_FAILED): Remote daemon is unavailable",
+    false,
+  ],
+  [
+    "a pipe into `cat` with clean output",
+    "record start /tmp/demo/voice.mp4 | cat",
+    "Recording started",
+    true,
+  ],
+  [
     "`&&` makes the start part of the call's success",
     "record start /tmp/demo/voice.mp4 && echo done",
     "Error (COMMAND_FAILED): x",

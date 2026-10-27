@@ -491,7 +491,10 @@ export function shellInvocations(
     const list = listTokens();
     currentUnmasked = !list.includes("||") && words[0] !== "!";
     // The call's exit status is the last command's; an action followed by `;` or `&` doesn't own it.
-    currentSequenced = commandTokens.slice(tokenIndex).some((t) => /^[;\n&]$/.test(t));
+    // A command piped into another doesn't own the pipeline's status either.
+    currentSequenced =
+      commandTokens[tokenIndex] === "|" ||
+      commandTokens.slice(tokenIndex).some((t) => /^[;\n&]$/.test(t));
     const finalAndSuccess =
       succeeded &&
       gate === "&&" &&

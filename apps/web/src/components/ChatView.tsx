@@ -187,7 +187,7 @@ import {
   applyProviderInstanceSettings,
   deriveProviderInstanceEntries,
   NO_PROVIDER_MODEL_SELECTION,
-  resolveDefaultProviderModelSelection,
+  resolveProjectDefaultProviderModelSelection,
   shouldShowInstanceBadge,
   sortProviderInstanceEntries,
 } from "../providerInstances";
@@ -761,25 +761,35 @@ export default function ChatView(props: ChatViewProps) {
     }
   }
   const nowMinute = useNowMinute();
+  const draftDefaultModelSelection = draftThread
+    ? resolveProjectSettings(
+        settings,
+        fallbackDraftProject?.id ?? null,
+        fallbackDraftProject ?? undefined,
+      ).settings.defaultModelSelection
+    : null;
+  const draftFallback = draftThread
+    ? resolveNewThreadModelSelection({
+        defaultSelection:
+          draftDefaultModelSelection ??
+          resolveProjectDefaultProviderModelSelection(
+            providersByEnvironment.get(draftThread.environmentId) ?? [],
+            settings,
+            draftThread.projectId,
+          ),
+        fallbackSelection: settings.fallbackModelSelection,
+        providers: providersByEnvironment.get(draftThread.environmentId) ?? [],
+        settings,
+        projectId: draftThread.projectId,
+        now: Date.parse(`${nowMinute}:00Z`),
+      })
+    : null;
   const localDraftThread = draftThread
     ? buildLocalDraftThread(
         threadId,
         draftThread,
-        resolveNewThreadModelSelection({
-          defaultSelection: resolveDefaultProviderModelSelection(
-            providersByEnvironment.get(draftThread.environmentId) ?? [],
-            resolveProjectSettings(
-              settings,
-              fallbackDraftProject?.id ?? null,
-              fallbackDraftProject ?? undefined,
-            ).settings.defaultModelSelection,
-          ),
-          fallbackSelection: settings.fallbackModelSelection,
-          providers: providersByEnvironment.get(draftThread.environmentId) ?? [],
-          settings,
-          projectId: draftThread.projectId,
-          now: Date.parse(`${nowMinute}:00Z`),
-        }).selection ?? NO_PROVIDER_MODEL_SELECTION,
+        (draftFallback?.fallback ? draftFallback.selection : draftDefaultModelSelection) ??
+          NO_PROVIDER_MODEL_SELECTION,
       )
     : undefined;
   const isServerThread = serverThread !== null;
@@ -1072,19 +1082,23 @@ export default function ChatView(props: ChatViewProps) {
   const { projectCloneBannerItem, projectCloneSendBlockReason } =
     useProjectCloneBanner(activeProjectRef);
   const defaultModelResolution = resolveNewThreadModelSelection({
-    defaultSelection: resolveDefaultProviderModelSelection(
-      providersByEnvironment.get(activeThread?.environmentId ?? environmentId) ?? [],
-      activeProjectSettings.settings.defaultModelSelection,
-    ),
+    defaultSelection:
+      activeProjectSettings.settings.defaultModelSelection ??
+      resolveProjectDefaultProviderModelSelection(
+        providersByEnvironment.get(activeThread?.environmentId ?? environmentId) ?? [],
+        settings,
+        activeProject?.id ?? null,
+      ),
     fallbackSelection: settings.fallbackModelSelection,
     providers: providersByEnvironment.get(activeThread?.environmentId ?? environmentId) ?? [],
     settings,
     projectId: activeProject?.id ?? null,
     now: Date.parse(`${nowMinute}:00Z`),
   });
-  const activeProjectDefaultModelSelection = isServerThread
-    ? activeProjectSettings.settings.defaultModelSelection
-    : defaultModelResolution.selection;
+  const activeProjectDefaultModelSelection =
+    !isServerThread && defaultModelResolution.fallback
+      ? defaultModelResolution.selection
+      : activeProjectSettings.settings.defaultModelSelection;
   const handleNewThreadInActiveProject = () => {
     startNewThreadForProject(activeProjectRef, handleNewThread);
   };

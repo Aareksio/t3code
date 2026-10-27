@@ -47,7 +47,7 @@ import { InlineButton } from "../ui/button";
 import { DraftProjectName } from "./DraftProjectName";
 import { DraftHeroProjectHeading } from "./DraftHeroProjectHeading";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
-import { resolveDefaultProviderModelSelection } from "../../providerInstances";
+import { resolveProjectDefaultProviderModelSelection } from "../../providerInstances";
 import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
 
 const ADD_PROJECT_VALUE = "add-project";
@@ -206,11 +206,12 @@ export function DraftHeroHeadline({
       const fallbackResolution = resolveNewThreadModelSelection({
         defaultSelection:
           defaultSelection ??
-          (useComposerDraftStore.getState().stickyActiveProvider !== null
+          (useComposerDraftStore.getState().stickyActiveProvider !== null || !environmentSettings
             ? null
-            : resolveDefaultProviderModelSelection(
+            : resolveProjectDefaultProviderModelSelection(
                 providersByEnvironment.get(project.environmentId) ?? [],
-                null,
+                environmentSettings,
+                project.id,
               )),
         fallbackSelection: environmentSettings?.fallbackModelSelection ?? null,
         providers: providersByEnvironment.get(project.environmentId) ?? [],

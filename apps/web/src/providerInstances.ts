@@ -239,3 +239,16 @@ export function resolveDefaultProviderModelSelection(
   const model = getDefaultProviderInstanceModel(providers, instanceId);
   return model ? { instanceId, model } : null;
 }
+
+export function resolveProjectDefaultProviderModelSelection(
+  providers: ReadonlyArray<ServerProvider>,
+  settings: ServerSettings,
+  projectId: ProjectId | null,
+): ModelSelection | null {
+  return resolveDefaultProviderModelSelection(
+    providers.filter((provider) =>
+      resolveProjectProviderInstanceEnabled(settings, projectId, provider.instanceId),
+    ),
+    null,
+  );
+}

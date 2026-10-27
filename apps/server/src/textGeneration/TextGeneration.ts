@@ -2,7 +2,11 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import type { ModelSelection, ProviderInstanceId } from "@t3tools/contracts";
-import { isProviderAvailable, isProviderTextGenerationCapable } from "@t3tools/contracts";
+import {
+  isProviderAvailable,
+  isProviderTextGenerationCapable,
+  resolveProjectProviderInstanceEnabled,
+} from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import { exhaustedUsageWindow } from "@t3tools/shared/usageLimits";
 import {
@@ -109,6 +113,7 @@ export const make = Effect.gen(function* () {
           return (
             instanceId !== selection.instanceId &&
             provider?.enabled === true &&
+            resolveProjectProviderInstanceEnabled(settings, null, instanceId) &&
             provider.installed &&
             provider.auth.status !== "unauthenticated" &&
             isProviderAvailable(provider) &&
@@ -139,6 +144,8 @@ export const make = Effect.gen(function* () {
           for (let depth = 0; depth < 8 && cause && typeof cause === "object"; depth++) {
             const failure = cause as {
               class?: unknown;
+              type?: unknown;
+              status?: unknown;
               code?: unknown;
               detail?: unknown;
               message?: unknown;
@@ -146,6 +153,9 @@ export const make = Effect.gen(function* () {
             };
             usageLimited ||=
               failure.class === "usage_limit" ||
+              failure.type === "provider.rate-limit" ||
+              // OpenCode also types a never-resetting empty balance as quota, with HTTP 402.
+              (failure.type === "provider.quota" && failure.status !== 402) ||
               [failure.code, failure.detail, failure.message].some(
                 (text) =>
                   typeof text === "string" &&

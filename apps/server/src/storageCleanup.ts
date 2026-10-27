@@ -1095,13 +1095,14 @@ const make = Effect.gen(function* () {
   });
 
   const reportRef = yield* SubscriptionRef.make<StorageCleanupReport | null>(null);
-  // Only deleted threads' worktrees wait on session stops; a deletion stays pending until a sweep that started after it.
+  // Only deleted threads' worktrees wait on session stops; a deletion stays pending until a sweep that started after it finishes.
   let deletedWorktreeWaits = true;
-  let deletedSinceSweepStarted = false;
+  let deletions = 0;
+  let sweptDeletions = 0;
   const sweep = Effect.fn("StorageCleanup.sweep")(function* (
     trigger: StorageCleanupReport["trigger"],
   ) {
-    deletedSinceSweepStarted = false;
+    const deletionsAtStart = deletions;
     const now = yield* Clock.currentTimeMillis;
     const serverSettings = yield* settingsService.getSettings;
     const settings = serverSettings.storageCleanup;
@@ -1125,6 +1126,7 @@ const make = Effect.gen(function* () {
         }),
       ),
     );
+    sweptDeletions = deletionsAtStart;
     for (const category of [
       {
         kind: "browser-artifacts" as const,
@@ -1266,11 +1268,11 @@ const make = Effect.gen(function* () {
     );
     yield* forkParked(
       Stream.runForEach(events, (event) => {
-        if (event.type === "thread.deleted") deletedSinceSweepStarted = true;
+        if (event.type === "thread.deleted") deletions++;
         return (event.type === "thread.deleted" ||
           (event.type === "provider-session.updated" &&
             (event.payload.status === "stopped" || event.payload.status === "error") &&
-            (deletedWorktreeWaits || deletedSinceSweepStarted))) &&
+            (deletedWorktreeWaits || deletions !== sweptDeletions))) &&
           anyWorktreePolicy(lastSettings, (rules) => rules.worktreeOnDelete)
           ? requestSweep
           : Effect.void;

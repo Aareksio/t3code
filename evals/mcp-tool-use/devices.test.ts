@@ -645,14 +645,14 @@ it.effect("denies every device tool with T3's own error when agent device access
     ] as const) {
       const result = yield* tools.call(name, input);
       assert.isTrue(result.isError, name);
-      // Refs before typed screenshot errors print their generic screenshot failure instead.
-      assert.oneOf(
-        result.text,
-        [
-          "Agent device access is turned off for this environment.",
-          ...(name === "device_screenshot" ? ["Device screenshot failed."] : []),
-        ],
-        name,
+      // Refs before typed screenshot errors print their generic screenshot failure instead, and
+      // later refs may add how to turn access on.
+      const denied = result.text.startsWith(
+        "Agent device access is turned off for this environment.",
+      );
+      assert.isTrue(
+        denied || (name === "device_screenshot" && result.text === "Device screenshot failed."),
+        `${name}: ${result.text}`,
       );
     }
     // T3 drops its device text for a thread without the capability, on refs that have it.

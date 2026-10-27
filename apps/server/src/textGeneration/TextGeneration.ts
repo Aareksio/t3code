@@ -5,7 +5,10 @@ import type { ModelSelection, ProviderInstanceId } from "@t3tools/contracts";
 import { isProviderAvailable, isProviderTextGenerationCapable } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import { exhaustedUsageWindow } from "@t3tools/shared/usageLimits";
-import { fallbackTextGenerationModelSelection } from "@t3tools/shared/serverSettings";
+import {
+  defaultTextGenerationModel,
+  fallbackTextGenerationModelSelection,
+} from "@t3tools/shared/serverSettings";
 import * as ServerSettings from "../serverSettings.ts";
 import type { ProviderTextGeneration } from "@t3tools/provider-core/server/textGeneration";
 import { TextGenerationError } from "@t3tools/contracts";
@@ -98,7 +101,7 @@ export const make = Effect.gen(function* () {
       );
       const fallback = fallbackTextGenerationModelSelection(
         settings.providerInstances,
-        (instanceId) => {
+        (instanceId, driver) => {
           const provider = snapshots.find((candidate) => candidate.instanceId === instanceId);
           return (
             instanceId !== selection.instanceId &&
@@ -107,7 +110,7 @@ export const make = Effect.gen(function* () {
             provider.auth.status !== "unauthenticated" &&
             isProviderAvailable(provider) &&
             isProviderTextGenerationCapable(provider) &&
-            !exhaustedUsageWindow(provider, now)
+            !exhaustedUsageWindow(provider, now, defaultTextGenerationModel(driver))
           );
         },
         {

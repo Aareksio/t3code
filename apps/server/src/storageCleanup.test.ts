@@ -32,8 +32,11 @@ import { CodexProviderCapabilitiesV2 } from "./orchestration-v2/Adapters/CodexAd
 import { ServerActivation } from "./serverActivation.ts";
 import { describe, expect, it } from "@effect/vitest";
 import {
+  EventId,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
+  ProviderSessionId,
   RunId,
   RuntimeRequestId,
   ThreadId,
@@ -921,6 +924,84 @@ describe("deleted thread worktrees", () => {
         outcome: "removed",
         reason: "Inactive for 30 days",
       });
+      expect(yield* fixture.fs.exists(fixture.worktree)).toBe(false);
+    }).pipe(Effect.provide(cleanupTestLayer), Effect.scoped),
+  );
+
+  // Releases one stopped-session event after the startup sweep and returns the snapshot reads it caused.
+  const stopSessionAfterStartupSweep = (
+    fixture: Effect.Success<ReturnType<typeof cleanupFixture>>,
+    threadId: ThreadId,
+    beforeStop: () => void = () => {},
+  ) =>
+    Effect.gen(function* () {
+      const startupSwept = yield* Deferred.make<void>();
+      const delivered = yield* Deferred.make<void>();
+      const stopped: OrchestrationV2DomainEvent = {
+        id: EventId.make("event:session-stopped"),
+        type: "provider-session.updated",
+        threadId,
+        occurredAt: at(0),
+        payload: {
+          id: ProviderSessionId.make("session-1"),
+          driver: ProviderDriverKind.make("codex"),
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          status: "stopped",
+          cwd: fixture.worktree,
+          model: null,
+          capabilities: CodexProviderCapabilitiesV2,
+          createdAt: at(-DAY_MS),
+          updatedAt: at(0),
+          lastError: null,
+        },
+      };
+      yield* fixture.activate(
+        Stream.fromEffect(Deferred.await(startupSwept)).pipe(
+          Stream.flatMap(() => Stream.make(stopped)),
+          Stream.concat(
+            Stream.fromEffect(Deferred.succeed(delivered, undefined)).pipe(Stream.drain),
+          ),
+        ),
+      );
+      yield* fixture.service.reports.pipe(
+        Stream.filter((report) => report !== null),
+        Stream.take(1),
+        Stream.runDrain,
+      );
+      yield* fixture.service.drain;
+      beforeStop();
+      const readsBefore = fixture.snapshotReads();
+      yield* Deferred.succeed(startupSwept, undefined);
+      yield* Deferred.await(delivered);
+      yield* fixture.service.drain;
+      return fixture.snapshotReads() - readsBefore;
+    });
+
+  it.effect("does not sweep when a live thread's session stops and no deleted worktree waits", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(NOW_MS);
+      const fixture = yield* cleanupFixture();
+      const reads = yield* stopSessionAfterStartupSweep(fixture, ThreadId.make("thread-1"));
+      expect(reads, "a live thread's stopped session re-read every thread").toBe(0);
+    }).pipe(Effect.provide(cleanupTestLayer), Effect.scoped),
+  );
+
+  it.effect("removes a deleted thread's worktree once its session stops", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(NOW_MS);
+      const fixture = yield* cleanupFixture({
+        ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+        worktreeAfterDays: null,
+        worktreeOnDelete: true,
+      });
+      const owner = parent(fixture.worktree);
+      fixture.setDeletedThreads([owner]);
+      fixture.setThreads([]);
+      fixture.setOpenSessionCwd(fixture.worktree);
+      const reads = yield* stopSessionAfterStartupSweep(fixture, owner.id, () =>
+        fixture.setSessionLive(false),
+      );
+      expect(reads).toBeGreaterThan(0);
       expect(yield* fixture.fs.exists(fixture.worktree)).toBe(false);
     }).pipe(Effect.provide(cleanupTestLayer), Effect.scoped),
   );

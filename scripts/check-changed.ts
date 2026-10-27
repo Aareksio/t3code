@@ -2,8 +2,8 @@
 // Runs CI's fast checks for this branch's changes: format and lint of the
 // changed files, knip, generated GraphQL operations, typecheck of the affected
 // packages and their dependents, the test files beside the changed files, and
-// the cross-file checks those miss (agent context budget, effect budget keys,
-// React Compiler coverage of the changed client files).
+// the cross-file checks those miss (agent context budget, React Compiler
+// coverage of the changed client files).
 // A dependency change also gets the unused-patch install check below. CI still
 // runs the full test suites and the jobs listed in the summary.
 //
@@ -140,20 +140,8 @@ for (const file of code) {
     if (entry.startsWith(prefix) && TEST.test(entry)) tests.add(NodePath.join(dir, entry));
   }
 }
-// These read files other than the ones beside them, so no changed file selects them.
+// It reads files other than the ones beside it, so no changed file selects it.
 if (affected.includes("t3")) tests.add("apps/server/src/provider/AgentContextBudget.test.ts");
-const BUDGET = "scripts/effect-budget.json";
-const budgetChanged = files.includes(BUDGET);
-if (budgetChanged || present.length < files.length) tests.add("scripts/effect-budget.test.ts");
-// An edited budget number only fails when lint reads the file it names.
-const lintFiles = budgetChanged
-  ? [
-      ...new Set([
-        ...code,
-        ...Object.keys(JSON.parse(NodeFS.readFileSync(NodePath.join(root, BUDGET), "utf8"))),
-      ]),
-    ]
-  : code;
 
 // React Compiler coverage compiles every client source file, so run only the
 // changed files' cases. Each app gets its own step: a -t filter in the main
@@ -288,7 +276,7 @@ const steps = [
     name: "format",
     args: ["fmt", "--check", "--no-error-on-unmatched-pattern", ...present],
   },
-  lintFiles.length > 0 && { name: "lint", args: ["lint", ...lintFiles] },
+  code.length > 0 && { name: "lint", args: ["lint", ...code] },
   ...(runKnip ? knipPasses : []),
   ...graphql.map((dir) => ({
     name: `graphql (${dir})`,

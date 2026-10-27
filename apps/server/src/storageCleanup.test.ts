@@ -932,7 +932,7 @@ describe("deleted thread worktrees", () => {
   const stopSessionAfterStartupSweep = (
     fixture: Effect.Success<ReturnType<typeof cleanupFixture>>,
     threadId: ThreadId,
-    beforeStop: () => void = () => {},
+    beforeStop: Effect.Effect<void> = Effect.void,
   ) =>
     Effect.gen(function* () {
       const startupSwept = yield* Deferred.make<void>();
@@ -969,7 +969,7 @@ describe("deleted thread worktrees", () => {
         Stream.runDrain,
       );
       yield* fixture.service.drain;
-      beforeStop();
+      yield* beforeStop;
       const readsBefore = fixture.snapshotReads();
       yield* Deferred.succeed(startupSwept, undefined);
       yield* Deferred.await(delivered);
@@ -998,8 +998,40 @@ describe("deleted thread worktrees", () => {
       fixture.setDeletedThreads([owner]);
       fixture.setThreads([]);
       fixture.setOpenSessionCwd(fixture.worktree);
-      const reads = yield* stopSessionAfterStartupSweep(fixture, owner.id, () =>
-        fixture.setSessionLive(false),
+      const reads = yield* stopSessionAfterStartupSweep(
+        fixture,
+        owner.id,
+        Effect.sync(() => fixture.setSessionLive(false)),
+      );
+      expect(reads).toBeGreaterThan(0);
+      expect(yield* fixture.fs.exists(fixture.worktree)).toBe(false);
+    }).pipe(Effect.provide(cleanupTestLayer), Effect.scoped),
+  );
+
+  it.effect("removes a deleted thread's worktree once a live thread's session in it stops", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(NOW_MS);
+      const fixture = yield* cleanupFixture({
+        ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+        worktreeAfterDays: null,
+        worktreeOnDelete: true,
+      });
+      const owner = parent(fixture.worktree);
+      const child = subagent(owner);
+      fixture.setDeletedThreads([owner]);
+      fixture.setThreads([child]);
+      fixture.setOpenSessionCwd(fixture.worktree);
+      const reads = yield* stopSessionAfterStartupSweep(
+        fixture,
+        child.id,
+        Effect.gen(function* () {
+          expect((yield* fixture.service.latestReport)?.entries[0]).toMatchObject({
+            threadId: owner.id,
+            outcome: "kept",
+            reason: "Provider session is still open",
+          });
+          fixture.setSessionLive(false);
+        }),
       );
       expect(reads).toBeGreaterThan(0);
       expect(yield* fixture.fs.exists(fixture.worktree)).toBe(false);

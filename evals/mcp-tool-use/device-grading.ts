@@ -146,8 +146,9 @@ const deviceArgs = (words: ReadonlyArray<string>) => {
   }
   return args;
 };
-const managedUi =
-  /^(?:snapshot|screenshot|record|open|close|tap|click|type|fill|press|swipe|scroll|settings|back|home)$/;
+// agent-device has dozens of device commands (longpress, swipe, batch, replay, …), so every
+// subcommand counts as device work except the ones that only describe the CLI.
+const agentMeta = /^(?:help|version|--version|-V)$/;
 const interpreter = /^(?:python\d*(?:\.\d+)?|node|ruby|perl|osascript)$/;
 const shells = new Set(["bash", "sh", "zsh"]);
 /** How agent-device reports a failed command, e.g. `Error (COMMAND_FAILED): …`. */
@@ -581,7 +582,8 @@ export function shellInvocations(
     const cli = executable(normalized[0]);
     const agent =
       ["agent-device", "mac_agent_device"].includes(cli) &&
-      managedUi.test(deviceArgs(normalized)[0] ?? "");
+      !!deviceArgs(normalized)[0] &&
+      !agentMeta.test(deviceArgs(normalized)[0]!);
     actions.push({
       words,
       remote,

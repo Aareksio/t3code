@@ -515,6 +515,8 @@ it.each([
   "ssh build-mac 'python3 -' <<'PY'\nimport subprocess\nsubprocess.run(['xcrun', 'simctl', 'install', 'PRIVATE', '/tmp/Acme.app'])\nPY",
   "for s in AcmeApp AcmeWidget; do ssh build-mac xcodebuild -scheme $s build; done",
   "while ! ssh build-mac test -f /tmp/ready; do sleep 1; done",
+  "ssh build-mac agent-device --version",
+  "ssh build-mac agent-device help longpress",
 ])("allows auxiliary shell work: %s", (command) => {
   const calls = [{ step: 0, tool: "Bash", input: { command } }];
   assert.isTrue(gradeDevice({ noRawUi: true }, { calls }).every((c) => c.pass));
@@ -547,6 +549,9 @@ it.each([
   "! xcrun simctl io PRIVATE screenshot /tmp/proof.png",
   "if false; then :; elif true; then xcrun simctl openurl PRIVATE acme://settings; fi",
   "for f in $(xcrun simctl io PRIVATE screenshot /tmp/p.png); do echo $f; done",
+  // Every agent-device command over ssh bypasses T3, including ones outside a fixed verb list.
+  "ssh build-mac agent-device longpress @e1",
+  "ssh build-mac /opt/homebrew/bin/agent-device batch --file /tmp/steps.json",
   // An uncertain short-circuit, and line continuations.
   "test -f /tmp/flag && true || xcrun simctl io PRIVATE screenshot /tmp/a.png",
   "ssh build-mac xcrun simctl io PRIVATE \\\n  screenshot /tmp/a.png",

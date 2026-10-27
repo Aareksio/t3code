@@ -447,6 +447,13 @@ it.each([
   ["Use device_open. Never use SSH for builds; use SSH to record the demo.", "mixed"],
   ["Use device_open. Do not avoid SSH for screenshots.", "mixed"],
   ["Use device_open. Use ssh mac 'xcrun simctl io A screenshot /tmp/proof.png'.", "mixed"],
+  // Live GPT briefs: "non-UI" and "without" restrict SSH rather than route UI through it.
+  ["Use device_open. SSH is allowed only for the non-UI operations described above.", "managed"],
+  [
+    "Use device_open. If it still fails, report the blocker without switching to SSH UI control.",
+    "managed",
+  ],
+  ["Use device_open. Use SSH for the UI, without asking first.", "mixed"],
 ])("classifies child routing: %s", (text, route) => {
   assert.equal(briefRoute(text), route);
 });
@@ -628,21 +635,26 @@ it.each([
   ["failed stop", ["start", "stop"], true, false],
   ["ceremonial launcher", ["echo start", "echo stop"], false, false],
   ["launcher prefix", ["suffix start", "suffix stop"], false, false],
+  // Live Claude samples keep the returned command in a variable: `AD=…; $AD record start`.
+  ["launcher variable", ["var start", "var stop"], false, true],
+  ["other variable", ["other start", "other stop"], false, false],
 ] as const)(
   "requires executed managed recording start and stop: %s",
   (_, operations, failed, pass) => {
     const launcher = "/home/user/.t3/device/bin/agent-device";
+    const command = (operation: string) => {
+      const [form, step] = operation.split(" ");
+      if (form === "echo") return `echo '${launcher} record ${step}'`;
+      if (form === "suffix") return `${launcher}-unbound record ${step}`;
+      if (form === "var") return `AD=${launcher}; "$AD" record ${step} /tmp/demo/voice.mp4`;
+      if (form === "other") return `AD=${launcher}-unbound; $AD record ${step} /tmp/demo/voice.mp4`;
+      return `${launcher} record ${operation} /tmp/demo/voice.mp4 --session t3-eval`;
+    };
     const calls = operations.map((operation, step) => ({
       step,
       tool: "Bash",
       failed: failed && step === 1,
-      input: {
-        command: operation.startsWith("echo ")
-          ? `echo '${launcher} record ${operation.slice(5)}'`
-          : operation.startsWith("suffix ")
-            ? `${launcher}-unbound record ${operation.slice(7)}`
-            : `${launcher} record ${operation} /tmp/demo/voice.mp4 --session t3-eval`,
-      },
+      input: { command: command(operation) },
     }));
     const run = {
       calls,

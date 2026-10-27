@@ -1302,19 +1302,27 @@ const shellCommands = (command: string) => {
  * then to stop it, and the agent's text names the file. Replay has no bytes to check.
  */
 const recorded = (run: SampleRun, path: string) => {
-  const steps = run.calls
-    .flatMap((call) =>
-      !call.failed && isRecord(call.input) && typeof call.input.command === "string"
-        ? shellCommands(call.input.command)
-        : [],
-    )
-    .flatMap((words) => {
+  const steps = run.calls.flatMap((call) => {
+    if (call.failed || !isRecord(call.input) || typeof call.input.command !== "string") return [];
+    // `AD=<returned command>; "$AD" record start` runs the returned command too.
+    const vars = new Map<string, string>();
+    return shellCommands(call.input.command).flatMap((words) => {
+      const at = words.findIndex((w) => !/^\w+=/.test(w));
+      if (at === -1) {
+        for (const w of words) vars.set(w.slice(0, w.indexOf("=")), w.slice(w.indexOf("=") + 1));
+        return [];
+      }
       // Variable assignments may lead; the executable itself must be a returned command.
-      const [executable = "", ...args] = words.slice(words.findIndex((w) => !/^\w+=/.test(w)));
+      const [first = "", ...args] = words.slice(at);
+      const executable = first.replace(
+        /^\$\{?(\w+)\}?$/,
+        (ref, name: string) => vars.get(name) ?? ref,
+      );
       const step = args[args.indexOf("record") + 1];
       const launched = (run.launchers ?? []).includes(executable) && args.includes("record");
       return launched && (step === "start" || step === "stop") ? [step] : [];
     });
+  });
   const started = steps.indexOf("start");
   return started !== -1 && steps.indexOf("stop", started) !== -1 && run.text.includes(path);
 };

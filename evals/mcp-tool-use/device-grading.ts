@@ -32,6 +32,8 @@ export function briefRoute(text: string) {
     .toLowerCase()
     .replaceAll("’", "'")
     .replace(/[`*]/g, "")
+    // "SSH for the non-UI operations" restricts SSH rather than routing UI through it.
+    .replace(/\bnon-(?:ui|device|simulator|screen)\b/g, "auxiliary")
     .replace(/\b(?:do not|don't)\s+avoid\b/g, "use")
     .replace(/\b(for [^.;,\n]+),\s*(?=(?:use|run)\b)/g, "$1 ")
     .split(
@@ -40,7 +42,7 @@ export function briefRoute(text: string) {
     .map((clause) =>
       (
         clause.split(
-          /\b(?:not|never|no|don't|cannot|can't|avoid|forbidden|prohibited|disallowed|rather than|instead of)\b/,
+          /\b(?:not|never|no|don't|cannot|can't|avoid|forbidden|prohibited|disallowed|rather than|instead of|without)\b/,
         )[0] ?? ""
       )
         .replace(

@@ -547,6 +547,10 @@ it.each([
   "! xcrun simctl io PRIVATE screenshot /tmp/proof.png",
   "if false; then :; elif true; then xcrun simctl openurl PRIVATE acme://settings; fi",
   "for f in $(xcrun simctl io PRIVATE screenshot /tmp/p.png); do echo $f; done",
+  // Review feedback on #25850: an uncertain short-circuit, and line continuations.
+  "test -f /tmp/flag && true || xcrun simctl io PRIVATE screenshot /tmp/a.png",
+  "ssh build-mac xcrun simctl io PRIVATE \\\n  screenshot /tmp/a.png",
+  'ssh build-mac "xcrun simctl io PRIVATE \\\n  screenshot /tmp/a.png"',
 ])("rejects simulator UI shell mutations: %s", (command) => {
   const calls = [{ step: 0, tool: "Bash", input: { command } }];
   assert.isTrue(gradeDevice({ noRawUi: true }, { calls }).some((c) => !c.pass));
@@ -1254,6 +1258,44 @@ it.each([
     pass,
   );
 });
+
+it.each([
+  [
+    "a later `;` command hides an agent-device error",
+    "record start /tmp/demo/voice.mp4; echo done",
+    "Error (COMMAND_FAILED): Remote daemon is unavailable\ndone",
+    false,
+  ],
+  [
+    "a later `;` command with clean output",
+    "record start /tmp/demo/voice.mp4; echo done",
+    "Recording started\ndone",
+    true,
+  ],
+  [
+    "`&&` makes the start part of the call's success",
+    "record start /tmp/demo/voice.mp4 && echo done",
+    "Error (COMMAND_FAILED): x",
+    true,
+  ],
+] as const)(
+  "credits a recording start only when the call's status covers it: %s",
+  (_, start, output, pass) => {
+    const launcher = "/home/user/.t3/userdata/device/bin/agent-device";
+    const calls = [
+      { step: 0, tool: "Bash", failed: false, output, input: { command: `${launcher} ${start}` } },
+      { step: 1, tool: "Bash", failed: false, input: { command: `${launcher} record stop` } },
+    ];
+    const run = {
+      calls,
+      launchers: [launcher],
+      text: "Saved /tmp/demo/voice.mp4",
+      stopReason: "end_turn",
+    };
+    const checks = gradeSample({ device: { recording: "/tmp/demo/voice.mp4" } }, run);
+    assert.equal(checks.find((check) => check.check.startsWith("device recording"))?.pass, pass);
+  },
+);
 
 it("leaves errored samples out of pass rates and lists them in the summary", () => {
   const usage = { input: 10, output: 0, cacheWrite: 0, cacheRead: 0 };

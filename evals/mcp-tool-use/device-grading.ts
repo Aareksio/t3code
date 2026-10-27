@@ -150,6 +150,8 @@ const managedUi =
   /^(?:snapshot|screenshot|record|open|close|tap|click|type|fill|press|swipe|scroll|settings|back|home)$/;
 const interpreter = /^(?:python\d*(?:\.\d+)?|node|ruby|perl|osascript)$/;
 const shells = new Set(["bash", "sh", "zsh"]);
+/** How agent-device reports a failed command, e.g. `Error (COMMAND_FAILED): …`. */
+const AGENT_DEVICE_ERROR = /\bError \([A-Z_]+\):/;
 
 export type ShellInvocation = {
   readonly words: ReadonlyArray<string>;
@@ -160,14 +162,18 @@ export type ShellInvocation = {
   readonly executed: boolean;
   /** An aggregate success cannot establish success of an action masked by ||. */
   readonly unmasked: boolean;
+  /** A later `;` or `&` command owns the call's exit status. */
+  readonly sequenced: boolean;
 };
 
 // A deliberately bounded shell grammar, not a shell executor. Keep quotes until expansion so
 // literal command examples, comments and quoted heredocs never become invocations.
 const tokens = (source: string) =>
-  source.match(
-    /`(?:\\.|[^`])*`|[<>]\((?:[^()]|\([^()]*\))*\)|\$\((?:[^()'"\\]|\\.|'[^']*'|"(?:\\.|[^"\\])*"|\([^()]*\))*\)|(?:"(?:\\.|[^"\\])*"|'[^']*'|\\.|\$\{\w+\}|[^\s;&|(){}<>"'\\])+|&&|\|\||[;\n&|(){}]|\d*(?:>>?|<)(?:&\d+)?/g,
-  ) ?? [];
+  source
+    .replace(/'[^']*'|\\\n/g, (part) => (part.startsWith("'") ? part : ""))
+    .match(
+      /`(?:\\.|[^`])*`|[<>]\((?:[^()]|\([^()]*\))*\)|\$\((?:[^()'"\\]|\\.|'[^']*'|"(?:\\.|[^"\\])*"|\([^()]*\))*\)|(?:"(?:\\.|[^"\\])*"|'[^']*'|\\.|\$\{\w+\}|[^\s;&|(){}<>"'\\])+|&&|\|\||[;\n&|(){}]|\d*(?:>>?|<)(?:&\d+)?/g,
+    ) ?? [];
 const unquote = (word: string, variables: Map<string, string>) =>
   word.replace(
     /'([^']*)'|"((?:\\.|[^"\\])*)"|\\(.)|([^'"\\]+)/g,
@@ -346,12 +352,14 @@ export function shellInvocations(
   let certain = true;
   let currentCertain = true;
   let currentUnmasked = true;
+  let currentSequenced = false;
   const append = (nested: ShellInvocation[]) =>
     actions.push(
       ...nested.map((action) => ({
         ...action,
         executed: action.executed && currentCertain,
         unmasked: action.unmasked && currentUnmasked,
+        sequenced: action.sequenced || currentSequenced,
       })),
     );
   const truth = (words: string[]): boolean | undefined => {
@@ -456,6 +464,8 @@ export function shellInvocations(
     if (!active || !words.length || reachable === false) return;
     const list = listTokens();
     currentUnmasked = !list.includes("||") && words[0] !== "!";
+    // The call's exit status is the last command's; an action followed by `;` or `&` doesn't own it.
+    currentSequenced = commandTokens.slice(tokenIndex).some((t) => /^[;\n&]$/.test(t));
     const finalAndSuccess =
       succeeded &&
       gate === "&&" &&
@@ -463,7 +473,17 @@ export function shellInvocations(
       !commandTokens.some((t) => /^(?:if|for|while|until|then|else|fi|do|done)$/.test(t)) &&
       !commandTokens.slice(tokenIndex).some((t) => /^[;\n&]$/.test(t));
     currentCertain = certain && (reachable === true || finalAndSuccess);
-    status = truth(words);
+    // A list's status is known only when this command certainly ran, or when its own result
+    // decides the list either way (`x && false`, `x || true`).
+    const value = truth(words);
+    status =
+      reachable === true
+        ? value
+        : gate === "&&" && value === false
+          ? false
+          : gate === "||" && value === true
+            ? true
+            : undefined;
     for (const word of [...rawWords, ...redirects]) if (!bodies.has(word)) substitutions(word);
     if (loopList) return;
     const body = words.map((word) => bodies.get(word)).find((value) => value !== undefined);
@@ -567,6 +587,7 @@ export function shellInvocations(
       remote,
       executed: currentCertain,
       unmasked: currentUnmasked,
+      sequenced: currentSequenced,
       raw:
         uiCommand.test([cli, ...normalized.slice(1)].join(" ")) ||
         (agent && (remote || cli === "mac_agent_device")),
@@ -735,12 +756,14 @@ export function gradeDevice(expect: typeof DeviceExpect.Type | undefined, run: D
   if (expect.recording !== undefined) {
     const steps = shell
       .filter(({ call }) => call.failed === false)
-      .flatMap(({ actions }) =>
+      .flatMap(({ call, actions }) =>
         actions
           .filter(
             (action) =>
               action.executed &&
               action.unmasked &&
+              // Before a later `;` command, only an error-free output shows the action succeeded.
+              (!action.sequenced || !AGENT_DEVICE_ERROR.test(call.output ?? "")) &&
               !action.remote &&
               (run.launchers ?? []).includes(action.words[0] ?? ""),
           )

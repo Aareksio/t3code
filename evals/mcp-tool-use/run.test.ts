@@ -388,7 +388,7 @@ const deviceCases = () =>
 it.effect("builds device cases from product-backed worlds and synthetic prior turns", () =>
   Effect.gen(function* () {
     const cases = deviceCases();
-    assert.equal(new Set(cases.map((c) => c.id)).size, 14);
+    assert.equal(new Set(cases.map((c) => c.id)).size, 15);
     const base = buildBase(
       {
         ...template,
@@ -406,7 +406,7 @@ it.effect("builds device cases from product-backed worlds and synthetic prior tu
       // would have opened the app, so its world starts that session. OWN seeds another owner.
       assert.deepEqual(
         [...(sample.devices?.sessions(sample.shell).values() ?? [])],
-        ["FAIL-AFTER-hub", "OWN-01"].includes(testCase.id) ? [{ app: true }] : [],
+        ["FAIL-AFTER-hub", "OWN-01", "OWN-02"].includes(testCase.id) ? [{ app: true }] : [],
         testCase.id,
       );
     }

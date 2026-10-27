@@ -1,3 +1,8 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeFS from "node:fs";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import { assert, expect, it } from "@effect/vitest";
 
 import {
@@ -8,7 +13,7 @@ import {
   gradeSample,
   makeSample,
   ranCalls,
-  type McpToolUseCase,
+  McpToolUseCase,
   mockOutput,
   normalizeToolInput,
   normalizeToolName,
@@ -16,7 +21,10 @@ import {
   shellOutput,
   shellRequest,
   t3SystemAppend,
+  t3SubagentContext,
+  withDevices,
 } from "./run.ts";
+import { briefRoute, gradeDevice } from "./device-grading.ts";
 import { taskPrompt } from "../../apps/server/src/mcp/OrchestratorMcpService.ts";
 
 it("grades Codex shell and subagent calls with the shared rules", () => {
@@ -367,4 +375,296 @@ it("stops a sample only once a must-not check has failed", () => {
   assert.isFalse(failedEarly(expect, run("Bash")));
   assert.isTrue(failedEarly(expect, run("watch_pull_request")));
   assert.isTrue(failedEarly({ textMustNot: ["paste"] }, run("Bash", "paste it here")));
+});
+
+const decodeDeviceCase = Schema.decodeSync(Schema.fromJsonString(McpToolUseCase));
+const deviceCases = () =>
+  NodeFS.readFileSync(new URL("./cases/device-manager.jsonl", import.meta.url), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => decodeDeviceCase(line));
+
+it.effect("builds nine device cases from product-backed worlds and synthetic prior turns", () =>
+  Effect.gen(function* () {
+    const cases = deviceCases();
+    assert.equal(new Set(cases.map((c) => c.id)).size, 9);
+    const base = buildBase(
+      {
+        ...template,
+        tools: [...template.tools, { name: "Read", input_schema: { type: "object" } }],
+      },
+      { model: "claude-sonnet-5-5", keepUserInstructions: false },
+    );
+    for (const testCase of cases) {
+      const sample = makeSample(testCase, base);
+      yield* withDevices(sample);
+      assert.doesNotThrow(() => buildMessages(sample));
+      assert.isDefined(testCase.setup.world?.devices);
+      assert.isUndefined(testCase.source?.openOn);
+    }
+    const native = cases.find((c) => c.id === "NAT-01")!;
+    assert.equal(native.kind, "bad");
+    assert.equal(native.setup.harness, "claude");
+    assert.isNotEmpty(cases.find((c) => c.id === "SEED-01")!.setup.priorTurns!);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.each([
+  ["Do not use SSH for UI but use device_open and its returned command.", "managed"],
+  ["Use device_open instead of SSH for screenshots.", "managed"],
+  [
+    "Use device_open for UI. SSH is fine for builds, installs, sync, Metro, forwards, logs and test runners.",
+    "managed",
+  ],
+  ["Use SSH for builds, installs, logs and locks.", "neutral"],
+  [
+    "Use device_open and its returned launcher. Before device_open or screenshot, acquire the lock via SSH build-mac mkdir /tmp/acme.lock.",
+    "managed",
+  ],
+  [
+    "Use device_open. Release the lock (ssh build-mac rm /tmp/acme.lock) as soon as you save the screenshot.",
+    "managed",
+  ],
+  [
+    "Use device_open. xcrun simctl is allowed only for builds/logs/ports, not UI driving.",
+    "managed",
+  ],
+  ["Use device_open. Use SSH to capture UI logs and run UI test runners.", "managed"],
+  ["Use device_open. Use SSH to record logs.", "managed"],
+  ["Use device_open. Use SSH to inspect the screen and save screenshots.", "mixed"],
+  ["Use device_open. SSH is prohibited for screenshots.", "managed"],
+  ["Use device_open. SSH is disallowed for UI.", "managed"],
+  ["Never use device_open. Use SSH for screenshots.", "raw"],
+  ["Avoid SSH for screenshots, and use device_open.", "managed"],
+  ["Use device_open. Do not take screenshots over SSH.", "managed"],
+  ["Use device_open. SSH must not be used for screenshots.", "managed"],
+  ["Use device_open. Use SSH to inspect the UI and save screenshots.", "mixed"],
+  ["Use device_open. SSH can be used to take screenshots.", "mixed"],
+  ["Use device_open. Only use ssh for builds, screenshots and recordings.", "mixed"],
+  ["Use device_open. Use SSH for builds and to inspect the simulator UI.", "mixed"],
+  ["Use device_open. For screenshots, use SSH.", "mixed"],
+  ["Use device_open. Use lab-shot and lab-ui over SSH.", "mixed"],
+  ["Use device_open. Never use SSH for builds; use SSH to record the demo.", "mixed"],
+  ["Use device_open. Do not avoid SSH for screenshots.", "mixed"],
+  ["Use device_open. Use ssh mac 'xcrun simctl io A screenshot /tmp/proof.png'.", "mixed"],
+])("classifies child routing: %s", (text, route) => {
+  assert.equal(briefRoute(text), route);
+});
+
+it("rejects a bypass mutation in every delegated or launched child brief", () => {
+  const good = ["delegate_task", "delegate_task", "t3_thread_launch"].map((tool, step) => ({
+    step,
+    tool,
+    input: {
+      [tool === "delegate_task" ? "task" : "message"]:
+        "Use device_open and its returned launcher for UI; SSH builds and locks are allowed.",
+    },
+  }));
+  assert.isTrue(gradeDevice({ briefs: 3 }, { calls: good }).every((c) => c.pass));
+  for (let i = 0; i < good.length; i++) {
+    const calls = good.map((call, at) =>
+      at === i
+        ? {
+            ...call,
+            input: {
+              [call.tool === "delegate_task" ? "task" : "message"]:
+                "Use device_open. Use SSH to inspect the UI and save screenshots.",
+            },
+          }
+        : call,
+    );
+    assert.isTrue(
+      gradeDevice({ briefs: 3 }, { calls }).some((c) => !c.pass),
+      `brief ${i}`,
+    );
+  }
+  assert.isTrue(gradeDevice({ briefs: 3 }, { calls: good.slice(0, 2) }).some((c) => !c.pass));
+  assert.isTrue(
+    gradeDevice(
+      { briefs: 3 },
+      { calls: [...good, { step: 4, tool: "delegate_task", input: {} }] },
+    ).some((c) => !c.pass),
+  );
+});
+
+it.each([
+  "ssh build-mac xcrun simctl install PRIVATE /tmp/Acme.app",
+  "ssh build-mac xcrun simctl addmedia PRIVATE /tmp/photo.png",
+  "ssh build-mac xcrun simctl listapps PRIVATE",
+  "ssh build-mac xcodebuild -scheme AcmeApp build",
+  "rsync -a /home/user/acme/app/ build-mac:/Users/user/acme/app/",
+  "ssh -L 8095:localhost:8095 build-mac 'cat /tmp/metro.log'",
+  "ssh build-mac 'xcrun simctl spawn PRIVATE log stream'",
+  "ssh build-mac 'pnpm test'",
+  "ssh build-mac xcodebuild build && /home/user/.t3/device/bin/agent-device snapshot -i",
+  "ssh build-mac 'xcodebuild build' && /home/user/.t3/device/bin/agent-device screenshot /tmp/proof.png",
+  "cat /home/user/uiux-lab/LAB.md",
+  "lab-ui --help",
+  "xcrun simctl io PRIVATE screenshot --help",
+  "printf '%s' 'ssh build-mac xcrun simctl io PRIVATE screenshot /tmp/proof.png'",
+])("allows auxiliary shell work: %s", (command) => {
+  const calls = [{ step: 0, tool: "Bash", input: { command } }];
+  assert.isTrue(gradeDevice({ noRawUi: true }, { calls }).every((c) => c.pass));
+});
+
+it.each([
+  "ssh build-mac xcrun simctl io PRIVATE screenshot /tmp/proof.png",
+  "ssh -oBatchMode=yes build-mac 'idb ui tap 20 30'",
+  "ssh build-mac screencapture /tmp/proof.png",
+  "ssh build-mac agent-device screenshot /tmp/proof.png",
+  "ssh build-mac 'xcodebuild build && agent-device screenshot /tmp/proof.png'",
+  "lab-shot /tmp/proof.png",
+  "lab-ui tap Settings",
+  "lab-launch acme://settings",
+  "xcrun simctl openurl PRIVATE acme://settings",
+  "xcrun simctl io PRIVATE recordVideo /tmp/demo.mp4",
+  "idb --udid PRIVATE screenshot /tmp/proof.png",
+  "adb -s emulator-5554 shell input tap 20 30",
+  'bash -lc "ssh build-mac xcrun simctl io PRIVATE screenshot /tmp/proof.png"',
+])("rejects simulator UI shell mutations: %s", (command) => {
+  const calls = [{ step: 0, tool: "Bash", input: { command } }];
+  assert.isTrue(gradeDevice({ noRawUi: true }, { calls }).some((c) => !c.pass));
+});
+
+it("shares failed device attempts across tools and launcher steps, resetting only per user turn", () => {
+  const failure = (step: number, turn: number, tool: string) => ({
+    step,
+    turn,
+    tool,
+    failed: true,
+    input:
+      tool === "Bash"
+        ? { command: "/home/user/.t3/device/bin/agent-device snapshot -i --session t3-eval" }
+        : {},
+  });
+  const calls = [
+    failure(0, 0, "Bash"),
+    failure(3, 0, "device_screenshot"),
+    failure(5, 1, "device_open"),
+    failure(7, 1, "Bash"),
+  ];
+  assert.isTrue(gradeDevice({ maxFailedAttemptsPerTurn: 2 }, { calls }).every((c) => c.pass));
+  assert.isTrue(
+    gradeDevice(
+      { maxFailedAttemptsPerTurn: 2 },
+      { calls: [...calls, failure(10, 1, "device_screenshot")] },
+    ).some((c) => !c.pass),
+  );
+  assert.isTrue(
+    gradeDevice(
+      { maxFailedAttemptsPerTurn: 2 },
+      { calls: calls.map(({ turn: _turn, ...call }) => call) },
+    ).some((c) => !c.pass),
+  );
+  const auxiliary = [
+    ...calls,
+    {
+      step: 11,
+      turn: 1,
+      tool: "Bash",
+      input: { command: "ssh build-mac xcodebuild build" },
+      failed: true,
+    },
+  ];
+  assert.isTrue(
+    gradeDevice({ maxFailedAttemptsPerTurn: 2 }, { calls: auxiliary }).every((c) => c.pass),
+  );
+  assert.isTrue(
+    gradeDevice(
+      { maxFailedAttemptsPerTurn: 2 },
+      { calls: [...calls, { ...failure(12, 1, "device_screenshot"), failed: false }] },
+    ).every((c) => c.pass),
+  );
+});
+
+it("applies device shell checks to decoded cases and stops raw UI early", () => {
+  for (const testCase of deviceCases()) {
+    const run = {
+      calls: [
+        {
+          step: 0,
+          tool: "Bash",
+          input: { command: "ssh build-mac xcrun simctl io PRIVATE screenshot /tmp/proof.png" },
+        },
+      ],
+      text: "",
+      stopReason: "tool_use",
+    };
+    assert.isTrue(
+      gradeSample(testCase.expect, run).some((c) => c.check.startsWith("shellMustNot") && !c.pass),
+      testCase.id,
+    );
+    assert.isTrue(failedEarly(testCase.expect, run), testCase.id);
+  }
+});
+
+it("keeps the shared recovery budget when a case is decoded and graded", () => {
+  const testCase = deviceCases().find((c) => c.id === "FAIL-AFTER-hub")!;
+  const calls = ["Bash", "device_screenshot", "device_open"].map((tool, step) => ({
+    step,
+    tool,
+    failed: true,
+    input: tool === "Bash" ? { command: "/home/user/.t3/device/bin/agent-device snapshot -i" } : {},
+  }));
+  const run = { calls, text: "Canvas is blocked: daemon unavailable.", stopReason: "end_turn" };
+  assert.isTrue(
+    gradeSample(testCase.expect, run).some((c) => c.check.startsWith("maxCalls device") && !c.pass),
+  );
+});
+
+it.each([
+  ["recording", ["start", "stop"], false, true],
+  ["missing stop", ["start"], false, false],
+  ["reversed", ["stop", "start"], false, false],
+  ["failed stop", ["start", "stop"], true, false],
+  ["ceremonial launcher", ["echo start", "echo stop"], false, false],
+  ["launcher prefix", ["suffix start", "suffix stop"], false, false],
+] as const)(
+  "requires executed managed recording start and stop: %s",
+  (_, operations, failed, pass) => {
+    const launcher = "/home/user/.t3/device/bin/agent-device";
+    const calls = operations.map((operation, step) => ({
+      step,
+      tool: "Bash",
+      failed: failed && step === 1,
+      input: {
+        command: operation.startsWith("echo ")
+          ? `echo '${launcher} record ${operation.slice(5)}'`
+          : operation.startsWith("suffix ")
+            ? `${launcher}-unbound record ${operation.slice(7)}`
+            : `${launcher} record ${operation} /tmp/demo/voice.mp4 --session t3-eval`,
+      },
+    }));
+    const run = {
+      calls,
+      launchers: [launcher],
+      text: "Saved /tmp/demo/voice.mp4",
+      stopReason: "end_turn",
+    };
+    const checks = gradeSample({ device: { recording: "/tmp/demo/voice.mp4" } }, run);
+    assert.equal(checks.find((check) => check.check.startsWith("device recording"))?.pass, pass);
+  },
+);
+
+it("gives native children hook context while excluding the parent's T3 append and history", async () => {
+  const testCase = deviceCases().find((c) => c.id === "NAT-01")!;
+  assert.isEmpty(testCase.setup.priorTurns ?? []);
+  const child = buildBase(template, {
+    model: "claude-sonnet-5-5",
+    keepUserInstructions: false,
+    nativeSubagent: true,
+  });
+  assert.notInclude(
+    child.system.map((block) => block.text).join("\n"),
+    t3SystemAppend("claude-sonnet-5-5"),
+  );
+  const subagentContext = await t3SubagentContext("claude-sonnet-5-5");
+  const messages = buildMessages(makeSample(testCase, { ...child, subagentContext }));
+  const shown = messages
+    .flatMap((message) => message.content)
+    .map((block) => block.text ?? "")
+    .join("\n");
+  if (subagentContext) assert.include(shown, subagentContext);
+  else assert.notInclude(shown, "SubagentStart hook additional context:");
+  assert.include(shown, testCase.prompt);
 });

@@ -987,7 +987,9 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
       const unborn = yield* driver.statusDetailsLocal(cwd);
       assert.lengthOf(unborn.workingTree.files, files.length);
       assert.equal(unborn.workingTree.insertions, files.length);
-      yield* git(cwd, ["commit", "-qm", "initial"]);
+      const initial = yield* driver.commit(cwd, "initial", "");
+      assert.match(initial.commitSha, /^[a-f0-9]{40}$/);
+      assert.isFalse((yield* driver.statusDetailsLocal(cwd)).hasWorkingTreeChanges);
       yield* Effect.forEach(files, (file) => fs.writeFileString(path.join(cwd, file), "after\n"), {
         concurrency: 16,
         discard: true,

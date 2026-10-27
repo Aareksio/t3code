@@ -20,12 +20,29 @@ type DeviceRun = {
     readonly input: unknown;
     readonly turn?: number;
     readonly failed?: boolean;
+    readonly output?: string;
   }>;
 };
 const record = (value: unknown): value is Readonly<Record<string, unknown>> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 const inputString = (input: unknown, key: string) =>
   record(input) && typeof input[key] === "string" ? input[key] : "";
+/**
+ * The device a `device_screenshot` call reached: the device in T3's result, else its input.
+ * Which host an omitted `hostId` means depends on the ref, so only a result settles it; without
+ * one it is `local`, as on main.
+ */
+const screenshotTarget = (call: DeviceRun["calls"][number]) => {
+  try {
+    const device: unknown = JSON.parse(call.output ?? "").device;
+    if (record(device) && typeof device.hostId === "string" && typeof device.id === "string")
+      return { hostId: device.hostId, deviceId: device.id };
+  } catch {}
+  return {
+    hostId: inputString(call.input, "hostId") || "local",
+    deviceId: inputString(call.input, "deviceId"),
+  };
+};
 const managed =
   /device_(?:open|screenshot|action)\b|device (?:panel|manager|tools)|returned\s+(?:(?:bound|pinned|agent-device|cli)\s+)*(?:launcher|driver|command)/;
 const ui =
@@ -688,15 +705,15 @@ export function gradeDevice(expect: typeof DeviceExpect.Type | undefined, run: D
         inputString(call.input, "deviceId") === expect.capture?.deviceId,
     );
     const capture =
-      run.calls.some(
-        (call) =>
-          call.tool === "device_screenshot" &&
-          (!inputString(call.input, "hostId") ||
-            inputString(call.input, "hostId") === expect.capture?.hostId) &&
-          (!inputString(call.input, "deviceId") ||
-            inputString(call.input, "deviceId") === expect.capture?.deviceId) &&
-          opened.some((open) => run.calls.indexOf(open) < run.calls.indexOf(call)),
-      ) ||
+      run.calls.some((call) => {
+        if (call.tool !== "device_screenshot") return false;
+        const target = screenshotTarget(call);
+        return (
+          target.hostId === expect.capture?.hostId &&
+          (!target.deviceId || target.deviceId === expect.capture?.deviceId) &&
+          opened.some((open) => run.calls.indexOf(open) < run.calls.indexOf(call))
+        );
+      }) ||
       shell.some(
         ({ call, actions }) =>
           opened.some((open) => run.calls.indexOf(open) < run.calls.indexOf(call)) &&
@@ -705,7 +722,9 @@ export function gradeDevice(expect: typeof DeviceExpect.Type | undefined, run: D
               action.executed &&
               action.managed &&
               (run.launchers ?? []).includes(action.words[0] ?? "") &&
-              ["screenshot", "snapshot", "record"].includes(deviceArgs(action.words)[0] ?? ""),
+              (["screenshot", "snapshot"].includes(deviceArgs(action.words)[0] ?? "") ||
+                (deviceArgs(action.words)[0] === "record" &&
+                  deviceArgs(action.words)[1] === "start")),
           ),
       );
     checks.push({

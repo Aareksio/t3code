@@ -91,6 +91,19 @@ it.effect("answers device calls with T3's handlers over the case's world", () =>
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
+it.effect("lists the boot state T3 left a device in", () =>
+  Effect.gen(function* () {
+    const { devices, deviceHosts } = deviceCase({}).setup.world ?? {};
+    const stopped = (devices ?? []).map((device) => ({ ...device, booted: false }));
+    const tools = yield* makeDeviceTools({ devices: stopped, deviceHosts }, base.environment);
+    const before = json((yield* tools.call("device_list", {})).text);
+    assert.isFalse(before.devices.find((d: { id: string }) => d.id === IPHONE).booted);
+    yield* tools.call("device_open", { hostId: MAC, deviceId: IPHONE });
+    const after = json((yield* tools.call("device_list", {})).text);
+    assert.isTrue(after.devices.find((d: { id: string }) => d.id === IPHONE).booted);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
 it("decodes only T3 device errors as injected failures", () => {
   assert.isDefined(deviceFailure(screenshotFailure));
   assert.isUndefined(deviceFailure({ error: "Synthetic hub is unavailable", isError: true }));

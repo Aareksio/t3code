@@ -1189,6 +1189,72 @@ it("does not credit a capture attempt on a different host", () => {
   );
 });
 
+it.each([
+  ["T3's result names the remote device", { hostId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }, true],
+  ["T3's result names a local device", { hostId: "local" }, false],
+  ["no result, so an omitted hostId is local", undefined, false],
+] as const)(
+  "credits a device_screenshot without hostId by the device T3 reached: %s",
+  (_, reached, pass) => {
+    const c = deviceCases().find((c) => c.id === "HOST-01a")!;
+    const input = {
+      hostId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      deviceId: "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB",
+    };
+    const output =
+      reached === undefined
+        ? undefined
+        : JSON.stringify({ device: { ...reached, id: input.deviceId, platform: "ios" } });
+    const calls = [
+      { step: 0, tool: "device_open", input, failed: false },
+      {
+        step: 1,
+        tool: "device_screenshot",
+        input: { deviceId: input.deviceId },
+        failed: reached === undefined,
+        ...(output === undefined ? {} : { output }),
+      },
+    ];
+    const checks = gradeSample(c.expect, {
+      calls,
+      text: "/tmp/proof/settings.png",
+      stopReason: "end_turn",
+    });
+    assert.equal(
+      checks.find((c) => c.check === "device successful open and capture attempt")?.pass,
+      pass,
+    );
+  },
+);
+
+it.each([
+  ["record start", true],
+  ["record contact-sheet /tmp/demo/old.mp4", false],
+  ["snapshot -i", true],
+] as const)("credits only new captures through the returned launcher: %s", (operation, pass) => {
+  const c = deviceCases().find((c) => c.id === "HOST-01a")!;
+  const launcher = "/home/user/.t3/userdata/device/bin/agent-device";
+  const input = {
+    hostId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    deviceId: "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB",
+  };
+  const calls = [
+    { step: 0, tool: "device_open", input, failed: false },
+    { step: 1, tool: "Bash", input: { command: `${launcher} ${operation}` }, failed: false },
+  ];
+  const run = {
+    calls,
+    launchers: [launcher],
+    text: "/tmp/proof/settings.png",
+    stopReason: "end_turn",
+  };
+  const checks = gradeSample(c.expect, run);
+  assert.equal(
+    checks.find((c) => c.check === "device successful open and capture attempt")?.pass,
+    pass,
+  );
+});
+
 it("leaves errored samples out of pass rates and lists them in the summary", () => {
   const usage = { input: 10, output: 0, cacheWrite: 0, cacheRead: 0 };
   const row = (id: string, pass: boolean, error?: string) => ({

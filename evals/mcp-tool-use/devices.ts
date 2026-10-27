@@ -156,6 +156,7 @@ const fakeHost = (
   agentEntry: string,
 ): DeviceHost.DeviceHost["Service"] => {
   const devices = world.devices.filter((device) => device.hostId === id);
+  const booted = new Map(devices.map((device) => [device.id, device.booted]));
   const availability = (platform: DevicePlatform) =>
     devices.some((device) => device.platform === platform)
       ? { platform, available: true }
@@ -164,13 +165,21 @@ const fakeHost = (
     nodePath: NODE,
     hub: { origin: HUB },
     devices: {
-      list: Effect.succeed({
-        devices: devices.map(({ hostId: _hostId, ...device }) => device),
+      // Boot state changes as T3 boots and shuts devices down, and later lists show it.
+      list: Effect.sync(() => ({
+        devices: devices.map(({ hostId: _hostId, ...device }) => ({
+          ...device,
+          booted: booted.get(device.id) ?? device.booted,
+        })),
         detail: undefined,
-      }),
-      boot: (device) => Effect.succeed(device.id),
+      })),
+      boot: (device) =>
+        Effect.sync(() => {
+          booted.set(device.id, true);
+          return device.id;
+        }),
       attach: () => Effect.void,
-      shutdown: () => Effect.void,
+      shutdown: (device) => Effect.sync(() => void booted.set(device.id, false)),
       screenshot: (device) => Effect.succeed(capture(device.platform)),
     },
     // T3 checks an Android emulator's host for ffmpeg's H.264 encoder before streaming it.

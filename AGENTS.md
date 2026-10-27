@@ -98,41 +98,13 @@ An empty database is a bad test. Seed your worktree's `.t3` with a copy of real 
 
 ## Verifying
 
-- Before you push, run `vp run check:changed`. It runs CI's fast checks for changed files: format, lint, knip, typecheck of affected packages and dependents, and tests beside changes. CI still runs the full test suites.
+- Before you push, run `vp run check:changed`. It runs CI's fast checks for changed files: format, lint, knip, typecheck of affected packages and dependents, tests beside changes, and the cross-file checks those miss. CI still runs the full test suites.
 - While you iterate, run `vp test run <files>`. For big files, add `-t "<name>"`.
 - Use `vp run typecheck`, not `npx tsc`; it caches per package. Both run tsc-rs (`typescript` is the `@tsc-rs/typescript` drop-in).
 - Run `node -e` snippets from `apps/server` or the owning package. `effect` does not resolve from the repo root.
-- Test meaningful logic or observable behavior. Do not render components to static markup to assert props or attributes, or add tests that merely assert callback wiring or mirror the implementation.
-- [Testing](docs/internals/testing.md) carries these same test rules, plus review guidance, for review bots. Change both together.
 - **Do not run repo-wide checks.** No `vp check`, no `vp run -r test`, no `vp run -r typecheck` unless I ask. CI owns the full suite.
-- Backend behavior changes ship with focused tests for that behavior.
-- Proof for a bug fix depends on the bug. Logic, data, state, and protocol bugs get a failing test first (the fewest that fail on `main` for that reason, in the module's existing test file), then the fix. Purely visual bugs (spacing, colour, alignment, a layout shift) get before/after captures as their proof and no test: do not add UI tests for nitpicks, and do not ask for one in review when a capture already shows it. A server-only fix with no visible surface ships the test plus a short runtime transcript.
-- The server is event-sourced, and side effects run after the command commits. In tests, drain the effect worker (`OrchestrationEffectWorkerV2.drain`) or await the specific persisted event or `Deferred` that marks the milestone. Never wait on sleeps or polling. A test that needs a timeout to pass is wrong. Concretely:
-  - `it.effect` runs on a `TestClock`; `Effect.sleep` only advances through `TestClock.adjust`. `it.live` is wall-clock and only for subprocess or network fixtures.
-  - No `yieldNow` or `sleep` polling loops. Await the `Deferred`, take from the `Queue`, or drain the worker.
-  - No per-test timeout argument or `retry`. The project timeout is the ceiling, and flaky tests are fixed, not retried.
-  - No `performance.now()` or `Date.now()` deltas. Assert on events and counts, not elapsed time.
-  - Browser tests assert through `expect.element` or `vi.waitFor`, never `requestAnimationFrame` or `transitionend`.
-  - `vi.mock` factories must not spread a real module that pulls in Shiki or the diff workers.
-  - `it.skip` and friends need a tracking issue on the line above: `// quarantine: #1234 <why>`.
-  - Lint enforces this: `t3code/no-test-timeout-or-unreasoned-skip`, `t3code/no-frame-waits-in-browser-tests`, `t3code/no-wall-clock-in-tests`, `t3code/no-real-time-wait-in-tests`, `t3code/no-polling-loop-in-tests`.
-- Web browser tests are `*.browser.test.tsx` or `*.browser.test.ts` and render with `await using screen = await render(...)` from `apps/web/test/render.tsx`. `t3code/require-disposable-render` errors on the old patterns.
-  - Acquire what the test drives after mounting (fake timers it advances, spies it sets up after mounting) after the render, so it disposes before the unmount. Anything the first render reads comes before it.
-  - A helper that renders and then waits or clicks puts the screen in an `AsyncDisposableStack` and `move()`s it out only on success, so a failed wait still unmounts.
-  - `rerender` needs a fresh element on every call.
-  - No lifecycle hooks and no module-level mutable state. Shared mock state that `vi.mock` factories read is reset by a `setup()` call at the top of the test.
-  - `router` is on by default. Pass `router: false` only with a one-line comment saying why.
-
-  ```tsx
-  it("saves on Enter", async () => {
-    const onSave = vi.fn();
-    using _now = vi.spyOn(Date, "now").mockReturnValue(0);
-    await using screen = await render(<TitleEditor onSave={onSave} />, { router: "/threads/1" });
-    await userEvent.type(screen.getByRole("textbox"), "Title{Enter}");
-    expect(onSave).toHaveBeenCalledWith("Title");
-  });
-  ```
-
+- Bug fixes and backend behavior changes need proof. [Testing](docs/internals/testing.md) says which kind: a failing test first, before/after captures, or a test plus a runtime transcript.
+- Read [Testing](docs/internals/testing.md) before you write, change, or review a test. It is the only copy of the test rules; lint enforces the mechanical ones.
 - Upon request, user-visible frontend changes should get one integrated pass in a real client: `test-t3-app` for web, `test-t3-mobile` for mobile. The primary agent does this once after integrating. Subagents do not launch their own dev servers. Ask permission before doing computer use or spinning up browsers.
 
 For authorized mobile verification, a missing or outdated native client is an install step, not a blocker. Run `vp run mobile:install <ios|android> [device-id]` on the device host before starting Metro; it targets the only booted simulator or connected Android device when the id is omitted. It installs the dev client for this checkout's native fingerprint from the shared cache in seconds and builds only when no machine has built it yet, so prefer it over `expo run:*`, `xcodebuild`, or `gradlew`, which rebuild from scratch. Its stdout is one JSON line; build output goes to the log it names. See `test-t3-mobile` for the full workflow.

@@ -104,6 +104,7 @@ export const make = Effect.gen(function* () {
             instanceId !== selection.instanceId &&
             provider?.enabled === true &&
             provider.installed &&
+            provider.auth.status !== "unauthenticated" &&
             isProviderAvailable(provider) &&
             isProviderTextGenerationCapable(provider) &&
             !exhaustedUsageWindow(provider, now)

@@ -3070,3 +3070,18 @@ it.each(["bound", "shared"])(
       );
   },
 );
+
+it.each([
+  "To turn it on: switch on Agent device access in Settings > Integrations > Devices.",
+  "Switch it on in Settings > Integrations > Devices.",
+])("R12 ACC-01 accepts the product validation enable wording: %s", (instruction) => {
+  const c = deviceCases().find((c) => c.id === "ACC-01")!;
+  const good = fleetTrace(c.id);
+  assert.deepEqual(
+    failed(c.expect, {
+      ...good,
+      finalText: `Agent device access is off. ${instruction} Start a new agent session.`,
+    }),
+    [],
+  );
+});

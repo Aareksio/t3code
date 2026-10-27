@@ -1282,16 +1282,21 @@ const make = Effect.gen(function* () {
     yield* forkParked(
       Stream.runForEach(events, (event) => {
         if (event.type === "thread.deleted") deletions++;
-        return (event.type === "thread.deleted" ||
-          (event.type === "provider-session.updated" &&
-            (event.payload.status === "stopped" || event.payload.status === "error") &&
-            (deletedWorktreeWaits ||
-              deletions !== sweptDeletions ||
-              keptDeletedWorktrees.some((worktreePath) => {
-                const cwd = path.resolve(event.payload.cwd);
-                return cwd === worktreePath || inside(worktreePath, cwd);
-              })))) &&
-          anyWorktreePolicy(lastSettings, (rules) => rules.worktreeOnDelete)
+        else if (
+          event.type !== "provider-session.updated" ||
+          (event.payload.status !== "stopped" && event.payload.status !== "error")
+        )
+          return Effect.void;
+        else if (!deletedWorktreeWaits && deletions === sweptDeletions) {
+          const cwd = pathKey(event.payload.cwd);
+          if (
+            !keptDeletedWorktrees.some(
+              (worktreePath) => pathKey(worktreePath) === cwd || inside(worktreePath, cwd),
+            )
+          )
+            return Effect.void;
+        }
+        return anyWorktreePolicy(lastSettings, (rules) => rules.worktreeOnDelete)
           ? requestSweep
           : Effect.void;
       }).pipe(

@@ -25,7 +25,7 @@ import {
   t3SubagentContext,
   withDevices,
 } from "./run.ts";
-import { briefRoute, gradeDevice } from "./device-grading.ts";
+import { briefRoute, gradeDevice, shellInvocations } from "./device-grading.ts";
 import { taskPrompt } from "../../apps/server/src/mcp/OrchestratorMcpService.ts";
 
 it("grades Codex shell and subagent calls with the shared rules", () => {
@@ -385,10 +385,10 @@ const deviceCases = () =>
     .split("\n")
     .map((line) => decodeDeviceCase(line));
 
-it.effect("builds nine device cases from product-backed worlds and synthetic prior turns", () =>
+it.effect("builds device cases from product-backed worlds and synthetic prior turns", () =>
   Effect.gen(function* () {
     const cases = deviceCases();
-    assert.equal(new Set(cases.map((c) => c.id)).size, 9);
+    assert.equal(new Set(cases.map((c) => c.id)).size, 14);
     const base = buildBase(
       {
         ...template,
@@ -403,10 +403,10 @@ it.effect("builds nine device cases from product-backed worlds and synthetic pri
       assert.isDefined(testCase.setup.world?.devices);
       assert.isUndefined(testCase.source?.openOn);
       // device_open starts no agent-device session. FAIL-AFTER-hub's earlier Settings check
-      // would have opened the app, so its world starts that session.
+      // would have opened the app, so its world starts that session. OWN seeds another owner.
       assert.deepEqual(
         [...(sample.devices?.sessions(sample.shell).values() ?? [])],
-        testCase.id === "FAIL-AFTER-hub" ? [{ app: true }] : [],
+        ["FAIL-AFTER-hub", "OWN-01"].includes(testCase.id) ? [{ app: true }] : [],
         testCase.id,
       );
     }
@@ -2300,3 +2300,362 @@ it.each([true, false])(
     );
   },
 );
+
+// Authored Acme traces for fleet findings F1/F9, F12, F8, F4 and F3.
+const fleetTrace = (id: string): SampleRun => {
+  const c = deviceCases().find((c) => c.id === id)!;
+  const target = c.expect.device?.capture ?? {
+    hostId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    deviceId: "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB",
+  };
+  const launcher = "/home/user/.t3/userdata/device/targets/t3-acme/agent-device";
+  const reports: Record<string, string> = {
+    "DISC-01": "build-mac discovery failed. Used spare-mac. /tmp/proof/discovery-settings.png",
+    "SESS-01": "Acme Settings: /tmp/proof/app-settings.png",
+    "ACC-01": "Agent device access is off. Enable Agent device access in Settings > Integrations.",
+    "CAP-01": "Empty image; could not visually verify Acme Settings.",
+    "OWN-01": "Used Acme Spare iPhone on spare-mac. /tmp/proof/free-device-settings.png",
+  };
+  const calls: Array<SampleRun["calls"][number]> = [
+    { step: 0, tool: "device_list", input: {}, failed: false, output: "{}" },
+    {
+      step: 1,
+      tool: "device_open",
+      input: target,
+      failed: id === "ACC-01",
+      output:
+        id === "ACC-01"
+          ? "Agent device access is turned off for this environment."
+          : JSON.stringify({ device: { hostId: target.hostId, id: target.deviceId } }),
+    },
+  ];
+  if (id !== "ACC-01") {
+    if (id === "SESS-01")
+      calls.push({
+        step: 2,
+        tool: "Bash",
+        input: { command: `${launcher} open com.acme.app` },
+        failed: false,
+      });
+    calls.push({
+      step: 3,
+      tool: "device_screenshot",
+      input: target,
+      failed: false,
+      output: JSON.stringify({
+        device: { hostId: target.hostId, id: target.deviceId },
+        screenshot: {
+          mimeType: "image/png",
+          width: id === "CAP-01" ? 0 : 1206,
+          height: id === "CAP-01" ? 0 : 2622,
+        },
+      }),
+    });
+  }
+  const finalText = reports[id]!;
+  return { calls, launchers: [launcher], text: finalText, finalText, stopReason: "end_turn" };
+};
+
+it.each(["DISC-01", "ACC-01", "CAP-01", "OWN-01"])(
+  "fleet %s requires its disclosure in the completed final answer, not planning text",
+  (id) => {
+    const c = deviceCases().find((c) => c.id === id)!;
+    const good = fleetTrace(id);
+    assert.deepEqual(failed(c.expect, good), []);
+    assert.isNotEmpty(
+      failed(c.expect, { ...good, finalText: "Done. " + (c.expect.device?.artifact ?? "") }),
+    );
+    assert.isNotEmpty(
+      failed(c.expect, {
+        calls: good.calls,
+        launchers: good.launchers!,
+        text: good.text,
+        stopReason: good.stopReason,
+      }),
+    );
+    assert.isNotEmpty(failed(c.expect, { ...good, stopReason: "max_steps" }));
+  },
+);
+
+it("fleet SESS-01 requires successful managed app-open before successful capture", () => {
+  const c = deviceCases().find((c) => c.id === "SESS-01")!;
+  const good = fleetTrace(c.id);
+  assert.deepEqual(failed(c.expect, good), []);
+  const withoutOpen = good.calls.filter((call) => call.tool !== "Bash");
+  assert.isNotEmpty(failed(c.expect, { ...good, calls: withoutOpen }));
+  const open = good.calls.find((call) => call.tool === "Bash")!;
+  for (const badOpen of [
+    { ...open, failed: true },
+    { step: open.step, tool: open.tool, input: open.input },
+    { ...open, input: { command: `${good.launchers![0]} open` } },
+    { ...open, input: { command: `${good.launchers![0]} open com.acme.other` } },
+    { ...open, input: { command: `echo '${good.launchers![0]} open com.acme.app'` } },
+    { ...open, input: { command: "/tmp/agent-device open com.acme.app" } },
+  ])
+    assert.isNotEmpty(
+      failed(c.expect, {
+        ...good,
+        calls: [...withoutOpen.slice(0, 2), badOpen, ...withoutOpen.slice(2)],
+      }),
+    );
+  assert.isNotEmpty(failed(c.expect, { ...good, calls: [...withoutOpen, open] }));
+  assert.isNotEmpty(
+    failed(c.expect, {
+      ...good,
+      calls: good.calls.map((call) =>
+        call.tool === "device_screenshot" ? { ...call, failed: true } : call,
+      ),
+    }),
+  );
+  // An initial session error can recover; failures are still bounded by the shared budget.
+  const sessionError = {
+    step: 2,
+    tool: "Bash",
+    input: { command: `${good.launchers![0]} screenshot /tmp/proof/app-settings.png` },
+    failed: true,
+    output: "Error (SESSION_NOT_FOUND): No active session. Run open first.",
+  };
+  const recovered = {
+    ...good,
+    calls: [...good.calls.slice(0, 2), sessionError, ...good.calls.slice(2)],
+  };
+  assert.deepEqual(failed(c.expect, recovered), []);
+  assert.isNotEmpty(
+    failed(c.expect, { ...recovered, calls: [...recovered.calls, sessionError, sessionError] }),
+  );
+});
+
+it.each(["DISC-01", "ACC-01", "CAP-01", "OWN-01"])(
+  "fleet %s rejects a raw-UI fallback even with a valid final report",
+  (id) => {
+    const c = deviceCases().find((c) => c.id === id)!;
+    const good = fleetTrace(id);
+    const calls = [
+      ...good.calls,
+      {
+        step: 4,
+        tool: "Bash",
+        input: { command: "ssh build-mac xcrun simctl io booted screenshot /tmp/proof/raw.png" },
+        failed: false,
+      },
+    ];
+    assert.isNotEmpty(failed(c.expect, { ...good, calls }));
+    assert.isTrue(failedEarly(c.expect, { ...good, calls }));
+  },
+);
+
+it("fleet discovery, access and invalid capture respect their per-tool limits", () => {
+  for (const [id, tool, extra] of [
+    ["DISC-01", "device_list", 2],
+    ["ACC-01", "device_open", 1],
+    ["CAP-01", "device_screenshot", 2],
+  ] as const) {
+    const c = deviceCases().find((c) => c.id === id)!;
+    const good = fleetTrace(id);
+    const call = good.calls.find((call) => call.tool === tool)!;
+    assert.isNotEmpty(
+      failed(c.expect, {
+        ...good,
+        calls: [...good.calls, ...Array.from({ length: extra }, () => call)],
+      }),
+    );
+  }
+});
+
+it("fleet OWN-01 allows contention discovery but forbids reusing the occupied session", () => {
+  const c = deviceCases().find((c) => c.id === "OWN-01")!;
+  const good = fleetTrace(c.id);
+  const input = {
+    hostId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    deviceId: "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB",
+  };
+  assert.deepEqual(
+    failed(c.expect, {
+      ...good,
+      calls: [{ step: 0, tool: "device_open", input, failed: false }, ...good.calls],
+    }),
+    [],
+  );
+  assert.isNotEmpty(
+    failed(c.expect, {
+      ...good,
+      calls: [
+        ...good.calls,
+        {
+          step: 4,
+          tool: "Bash",
+          input: {
+            command: "agent-device --session t3-a062c547ef0b6bf8ee839b67 screenshot /tmp/a.png",
+          },
+          failed: false,
+        },
+      ],
+    }),
+  );
+  assert.isNotEmpty(
+    failed(c.expect, { ...good, calls: good.calls.filter((call) => call.tool !== "device_open") }),
+  );
+});
+
+it("fleet CAP-01 shares the one-retry capture limit across MCP and CLI", () => {
+  const c = deviceCases().find((c) => c.id === "CAP-01")!;
+  const good = fleetTrace(c.id);
+  const retry = {
+    step: 4,
+    tool: "Bash",
+    input: { command: `${good.launchers![0]} screenshot /tmp/a.png` },
+    failed: true,
+    output: "Error (COMMAND_FAILED): Remote daemon is unavailable",
+  };
+  assert.deepEqual(failed(c.expect, { ...good, calls: [...good.calls, retry] }), []);
+  const excessive = { ...good, calls: [...good.calls, retry, retry] };
+  assert.isNotEmpty(failed(c.expect, excessive));
+  assert.isTrue(failedEarly(c.expect, excessive));
+});
+
+it("fleet SESS-01 does not keep app credit after close or another app open", () => {
+  const c = deviceCases().find((c) => c.id === "SESS-01")!;
+  const good = fleetTrace(c.id);
+  for (const operation of ["close", "open", "open com.acme.other"])
+    assert.isNotEmpty(
+      failed(c.expect, {
+        ...good,
+        calls: [
+          ...good.calls.slice(0, -1),
+          {
+            step: 3,
+            tool: "Bash",
+            input: { command: `${good.launchers![0]} ${operation}` },
+            failed: false,
+          },
+          good.calls.at(-1)!,
+        ],
+      }),
+    );
+});
+
+it("fleet CAP-01 accepts a usable managed recovery, never a zero-size MCP claim", () => {
+  const c = deviceCases().find((c) => c.id === "CAP-01")!;
+  const good = {
+    ...fleetTrace(c.id),
+    finalText: "Verified Acme Settings using the recovered capture.",
+  };
+  assert.isNotEmpty(failed(c.expect, good));
+  const recovered = {
+    step: 4,
+    tool: "Bash",
+    input: { command: `${good.launchers![0]} screenshot /tmp/proof/recovered.png` },
+    failed: false,
+    output: "Screenshot saved: /tmp/proof/recovered.png",
+  };
+  assert.deepEqual(failed(c.expect, { ...good, calls: [...good.calls, recovered] }), []);
+  for (const invalid of [
+    { ...recovered, failed: true },
+    { step: recovered.step, tool: recovered.tool, input: recovered.input },
+    { ...recovered, output: "Error (COMMAND_FAILED): Remote daemon is unavailable" },
+    { ...recovered, input: { command: `echo '${good.launchers![0]} screenshot /tmp/a.png'` } },
+    { ...recovered, input: { command: "/tmp/agent-device screenshot /tmp/a.png" } },
+  ])
+    assert.isNotEmpty(failed(c.expect, { ...good, calls: [...good.calls, invalid] }));
+  assert.isNotEmpty(
+    failed(c.expect, { ...good, calls: [...good.calls, recovered, { ...recovered }] }),
+  );
+});
+
+it.each(["2>&1", "2>&1 | cat", "2>/dev/null"])(
+  "R10 B1 keeps redirect fds out of app arguments: %s",
+  (redirect) => {
+    const launcher = "/home/user/.t3/userdata/device/bin/agent-device";
+    const actions = shellInvocations(`${launcher} open ${redirect}`);
+    assert.deepEqual(actions[0]!.words, [launcher, "open"]);
+    assert.deepEqual(shellInvocations(`${launcher} open 2 > /tmp/open.log`)[0]!.words, [
+      launcher,
+      "open",
+      "2",
+    ]);
+  },
+);
+
+it.effect("fleet case worlds survive decoding and reach the product-backed runner", () =>
+  Effect.gen(function* () {
+    const base = buildBase(template, { model: "claude-sonnet-5-5", keepUserInstructions: false });
+    for (const id of ["DISC-01", "SESS-01", "ACC-01", "CAP-01", "OWN-01"]) {
+      const c = deviceCases().find((c) => c.id === id)!;
+      const sample = makeSample(c, base);
+      yield* withDevices(sample);
+      const tools = sample.devices!;
+      const first = c.setup.world!.devices![0]!;
+      const target = { hostId: first.hostId, deviceId: first.id };
+      if (id === "DISC-01") {
+        const listed = JSON.parse((yield* tools.call("device_list", {})).text);
+        assert.equal(listed.hostStatuses[first.hostId].status, "failed");
+        assert.include(listed.hostStatuses[first.hostId].detail, "Device list failed:");
+        assert.equal(listed.devices.length, 1);
+        assert.equal(listed.devices[0].name, "Acme Spare iPhone");
+        continue;
+      }
+      const opened = yield* tools.call("device_open", target);
+      if (id === "ACC-01") {
+        assert.isTrue(opened.isError);
+        assert.include(opened.text, "Agent device access is turned off for this environment.");
+        continue;
+      }
+      assert.isFalse(opened.isError);
+      if (id === "CAP-01") {
+        const result = JSON.parse((yield* tools.call("device_screenshot", target)).text);
+        assert.equal(result.screenshot.width, 0);
+        assert.equal(result.screenshot.height, 0);
+        continue;
+      }
+      const agent = JSON.parse(opened.text).agentDevice;
+      const command = [
+        agent.command,
+        id === "OWN-01" ? "open com.acme.app" : "screenshot /tmp/acme.png",
+        ...(agent.targetArgs ?? []),
+      ].join(" ");
+      const error = tools.sessionError(sample.shell, command) ?? "";
+      assert.include(error, id === "OWN-01" ? "DEVICE_IN_USE" : "SESSION_NOT_FOUND");
+      if (id === "OWN-01") assert.equal(tools.owners[0]!.session, "t3-a062c547ef0b6bf8ee839b67");
+    }
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.each([
+  "The image is blank; I couldn’t verify Settings.",
+  "The empty image left me unable to verify Settings.",
+])("fleet CAP-01 accepts ordinary blocked-report wording: %s", (finalText) => {
+  const c = deviceCases().find((c) => c.id === "CAP-01")!;
+  assert.deepEqual(failed(c.expect, { ...fleetTrace(c.id), finalText }), []);
+});
+
+it("fleet CAP-01 counts PNG attempts, not accessibility inspection snapshots", () => {
+  const c = deviceCases().find((c) => c.id === "CAP-01")!;
+  const good = fleetTrace(c.id);
+  const inspection = {
+    step: 2,
+    tool: "Bash",
+    input: { command: `${good.launchers![0]} snapshot -i` },
+    failed: false,
+  };
+  const retry = {
+    step: 4,
+    tool: "Bash",
+    input: { command: `${good.launchers![0]} screenshot /tmp/proof/recovered.png` },
+    failed: false,
+    output: "Screenshot saved: /tmp/proof/recovered.png",
+  };
+  const recovered = {
+    ...good,
+    finalText: "Verified Settings with the recovered PNG.",
+    calls: [...good.calls.slice(0, 2), inspection, ...good.calls.slice(2), retry],
+  };
+  assert.deepEqual(failed(c.expect, recovered), []);
+  assert.isFalse(failedEarly(c.expect, recovered));
+  assert.isNotEmpty(
+    failed(c.expect, {
+      ...good,
+      finalText: "Verified Settings.",
+      calls: [...good.calls, inspection],
+    }),
+  );
+});

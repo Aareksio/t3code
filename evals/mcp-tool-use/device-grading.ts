@@ -5,8 +5,17 @@ export const DeviceExpect = Schema.Struct({
   recording: Schema.optional(Schema.String),
   artifact: Schema.optional(Schema.String),
   noRawUi: Schema.optional(Schema.Boolean),
-  capture: Schema.optional(Schema.Struct({ hostId: Schema.String, deviceId: Schema.String })),
+  capture: Schema.optional(
+    Schema.Struct({
+      hostId: Schema.String,
+      deviceId: Schema.String,
+      app: Schema.optional(Schema.String),
+    }),
+  ),
+  report: Schema.optional(Schema.Array(Schema.String)),
+  reportOrCapture: Schema.optional(Schema.Boolean),
   maxFailedAttemptsPerTurn: Schema.optional(Schema.Number),
+  maxCaptureAttempts: Schema.optional(Schema.Number),
 });
 
 type DeviceRun = {
@@ -205,7 +214,7 @@ const tokens = (source: string) =>
   source
     .replace(/'[^']*'|\\[\s\S]/g, (part) => (part === "\\\n" ? "" : part))
     .match(
-      /`(?:\\.|[^`])*`|[<>]\((?:[^()]|\([^()]*\))*\)|\$\((?:[^()'"\\]|\\.|'[^']*'|"(?:\\.|[^"\\])*"|\([^()]*\))*\)|(?:"(?:\\.|[^"\\])*"|'[^']*'|\\.|\$\{\w+\}|[^\s;&|(){}<>"'\\])+|&&|\|\||[;\n&|(){}]|\d*(?:>>?|<)(?:&\d+)?/g,
+      /`(?:\\.|[^`])*`|[<>]\((?:[^()]|\([^()]*\))*\)|\$\((?:[^()'"\\]|\\.|'[^']*'|"(?:\\.|[^"\\])*"|\([^()]*\))*\)|\d+(?:>>?|<)(?:&\d+)?|(?:"(?:\\.|[^"\\])*"|'[^']*'|\\.|\$\{\w+\}|[^\s;&|(){}<>"'\\])+|&&|\|\||[;\n&|(){}]|\d*(?:>>?|<)(?:&\d+)?/g,
     ) ?? [];
 const unquote = (word: string, variables: Map<string, string>) =>
   word.replace(
@@ -756,95 +765,150 @@ export function shellInvocations(
 export function gradeDevice(expect: typeof DeviceExpect.Type | undefined, run: DeviceRun) {
   const checks: Array<{ check: string; pass: boolean }> = [];
   if (!expect) return checks;
+  const add = (check: string, pass: boolean) => checks.push({ check, pass });
   if (expect.briefs !== undefined) {
     const briefs = run.calls.filter((call) =>
       ["delegate_task", "t3_thread_launch"].includes(call.tool),
     );
-    checks.push({ check: "device briefs count", pass: briefs.length >= expect.briefs });
+    add("device briefs count", briefs.length >= expect.briefs);
     for (const [i, call] of briefs.entries()) {
       const route = briefRoute(
         inputString(call.input, call.tool === "delegate_task" ? "task" : "message"),
       );
-      checks.push({
-        check: `device brief ${i + 1} ${call.tool} ${route}`,
-        pass: route === "managed",
-      });
+      add(`device brief ${i + 1} ${call.tool} ${route}`, route === "managed");
     }
   }
   if (expect.artifact !== undefined)
-    checks.push({
-      check: `device final artifact ${expect.artifact}`,
-      pass: run.stopReason === "end_turn" && (run.finalText ?? "").includes(expect.artifact),
-    });
+    add(
+      `device final artifact ${expect.artifact}`,
+      run.stopReason === "end_turn" && (run.finalText ?? "").includes(expect.artifact),
+    );
   const variables = new Map<string, string>();
   const shell = run.calls
     .filter((call) => ["Bash", "Monitor"].includes(call.tool))
-    .map((call) => ({
-      call,
-      actions: shellInvocations(
-        inputString(call.input, "command"),
-        variables,
-        false,
-        call.failed === false,
-      ),
-    }));
-  if (expect.noRawUi)
-    checks.push({
-      check: "shellMustNot device UI",
-      pass: !shell.some(({ actions }) => actions.some((action) => action.raw)),
-    });
-  if (expect.capture) {
-    const opened = run.calls.filter(
+    .map(
       (call) =>
-        call.tool === "device_open" &&
-        call.failed === false &&
-        inputString(call.input, "hostId") === expect.capture?.hostId &&
-        inputString(call.input, "deviceId") === expect.capture?.deviceId,
+        [
+          call,
+          shellInvocations(
+            inputString(call.input, "command"),
+            variables,
+            false,
+            call.failed === false,
+          ).map((action) => ({
+            ...action,
+            args: deviceArgs(action.words),
+            bound: !action.remote && (run.launchers ?? []).includes(action.words[0] ?? ""),
+          })),
+        ] as const,
     );
-    const capture =
-      run.calls.some((call) => {
-        if (call.tool !== "device_screenshot") return false;
-        const target = screenshotTarget(call, run.calls.slice(0, run.calls.indexOf(call)));
+  const allActions = shell.flatMap(([, actions]) => actions);
+  const recovered =
+    expect.reportOrCapture &&
+    (run.calls.some((call) => {
+      if (call.tool !== "device_screenshot" || call.failed !== false) return false;
+      try {
+        const image: unknown = JSON.parse(call.output ?? "").screenshot;
         return (
-          target?.hostId === expect.capture?.hostId &&
-          target?.deviceId === expect.capture?.deviceId &&
-          opened.some((open) => run.calls.indexOf(open) < run.calls.indexOf(call))
+          record(image) &&
+          typeof image.width === "number" &&
+          image.width > 0 &&
+          typeof image.height === "number" &&
+          image.height > 0
         );
-      }) ||
+      } catch {
+        return false;
+      }
+    }) ||
       shell.some(
-        ({ call, actions }) =>
-          opened.some((open) => run.calls.indexOf(open) < run.calls.indexOf(call)) &&
+        ([call, actions]) =>
+          call.failed === false &&
+          !AGENT_DEVICE_ERROR.test(call.output ?? "") &&
           actions.some(
             (action) =>
               action.executed &&
-              action.managed &&
-              (run.launchers ?? []).includes(action.words[0] ?? "") &&
-              (["screenshot", "snapshot"].includes(deviceArgs(action.words)[0] ?? "") ||
-                (deviceArgs(action.words)[0] === "record" &&
-                  deviceArgs(action.words)[1] === "start")),
+              action.unmasked &&
+              !action.sequenced &&
+              action.bound &&
+              action.args[0] === "screenshot",
           ),
+      ));
+  for (const pattern of expect.report ?? [])
+    add(
+      `device final report /${pattern}/`,
+      run.stopReason === "end_turn" &&
+        (!!recovered || new RegExp(pattern).test(run.finalText ?? "")),
+    );
+  if (expect.noRawUi) add("shellMustNot device UI", !allActions.some((action) => action.raw));
+  if (expect.maxCaptureAttempts !== undefined)
+    add(
+      `maxCalls device captures <= ${expect.maxCaptureAttempts}`,
+      run.calls.filter((call) => call.tool === "device_screenshot").length +
+        allActions.filter((action) => action.managed && action.args[0] === "screenshot").length <=
+        expect.maxCaptureAttempts,
+    );
+  if (expect.capture) {
+    const target = expect.capture;
+    const matches = (value: ReturnType<typeof inputTarget> | undefined) =>
+      value?.hostId === target.hostId && value?.deviceId === target.deviceId;
+    const appSessions = new Set<string>();
+    let opened = false,
+      captured = false;
+    for (const [index, call] of run.calls.entries()) {
+      if (call.tool === "device_open" && call.failed === false && matches(inputTarget(call)))
+        opened = true;
+      const appReady = !target.app || (call.failed === false && appSessions.size > 0);
+      if (
+        opened &&
+        appReady &&
+        call.tool === "device_screenshot" &&
+        matches(screenshotTarget(call, run.calls.slice(0, index)))
+      )
+        captured = true;
+      const actions = (shell.find(([source]) => source === call)?.[1] ?? []).filter(
+        (action) => action.executed && action.managed && action.bound,
       );
-    checks.push({
-      check: "device successful open and capture attempt",
-      pass: opened.length > 0 && capture,
-    });
+      for (const { args, words } of actions)
+        if (
+          opened &&
+          (!target.app || (call.failed === false && appSessions.has(words[0]!))) &&
+          (["screenshot", "snapshot"].includes(args[0] ?? "") ||
+            (args[0] === "record" && args[1] === "start"))
+        )
+          captured = true;
+      // Only a separate successful app-open grants app evidence; the latest open/close wins.
+      for (const action of actions) {
+        const { args, words } = action;
+        if (!target.app || !["open", "close"].includes(args[0] ?? "")) continue;
+        appSessions.delete(words[0]!);
+        if (
+          args[0] === "open" &&
+          args[1] === target.app &&
+          call.failed === false &&
+          action.unmasked &&
+          !action.sequenced &&
+          !AGENT_DEVICE_ERROR.test(call.output ?? "")
+        )
+          appSessions.add(words[0]!);
+      }
+    }
+    add("device successful open and capture attempt", captured);
   }
   if (expect.recording !== undefined) {
-    const steps = shell.flatMap(({ call, actions }) => {
-      const operations = actions
-        .map((action) => ({ action, args: deviceArgs(action.words) }))
-        .filter(({ args }) => args[0] === "record" && /^(?:start|stop)$/.test(args[1] ?? ""));
+    const steps = [...shell].flatMap(([call, actions]) => {
+      const operations = actions.filter(
+        ({ args }) => args[0] === "record" && /^(?:start|stop)$/.test(args[1] ?? ""),
+      );
       return operations
         .filter(
-          ({ action, args }) =>
+          (action) =>
             action.executed &&
             action.unmasked &&
-            !action.remote &&
-            (run.launchers ?? []).includes(action.words[0] ?? "") &&
+            action.bound &&
             ((!action.sequenced && call.failed === false) ||
-              (operations.filter((o) => o.args[1] === args[1]).length === 1 &&
+              (operations.filter((o) => o.args[1] === action.args[1]).length === 1 &&
                 new RegExp(
-                  `(?:^|\\n)[^\\w\\n]*Recording ${args[1] === "start" ? "started" : "stopped"}\\b|"kind"\\s*:\\s*"recording${args[1] === "start" ? "Started" : "Stopped"}"`,
+                  `(?:^|\\n)[^\\w\\n]*Recording ${action.args[1] === "start" ? "started" : "stopped"}\\b|"kind"\\s*:\\s*"recording${action.args[1] === "start" ? "Started" : "Stopped"}"`,
                   "i",
                 ).test(call.output ?? ""))),
         )
@@ -863,7 +927,7 @@ export function gradeDevice(expect: typeof DeviceExpect.Type | undefined, run: D
   if (expect.maxFailedAttemptsPerTurn !== undefined) {
     const failedByTurn = new Map<number, number>();
     for (const call of run.calls) {
-      const actions = shell.find((entry) => entry.call === call)?.actions ?? [];
+      const actions = shell.find(([source]) => source === call)?.[1] ?? [];
       // A failed raw attempt, such as agent-device over ssh, is still a failed device attempt.
       const device = actions.filter((action) => action.managed || action.raw).length;
       // agent-device prints one error per failed command, even when a later command succeeds.
@@ -877,10 +941,10 @@ export function gradeDevice(expect: typeof DeviceExpect.Type | undefined, run: D
       failedByTurn.set(turn, (failedByTurn.get(turn) ?? 0) + attempts);
     }
     const max = expect.maxFailedAttemptsPerTurn;
-    checks.push({
-      check: `maxCalls device failures per user turn <= ${max}`,
-      pass: [...failedByTurn.values()].every((count) => count <= max),
-    });
+    add(
+      `maxCalls device failures per user turn <= ${max}`,
+      [...failedByTurn.values()].every((count) => count <= max),
+    );
   }
   return checks;
 }

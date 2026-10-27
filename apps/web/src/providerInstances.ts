@@ -245,10 +245,12 @@ export function resolveProjectDefaultProviderModelSelection(
   settings: ServerSettings,
   projectId: ProjectId | null,
 ): ModelSelection | null {
-  return resolveDefaultProviderModelSelection(
-    providers.filter((provider) =>
-      resolveProjectProviderInstanceEnabled(settings, projectId, provider.instanceId),
+  const entry = resolveSelectableProviderInstanceEntry(
+    sortProviderInstanceEntries(
+      applyProviderInstanceSettings(deriveProviderInstanceEntries(providers), settings, projectId),
     ),
-    null,
+    undefined,
   );
+  const model = entry ? getDefaultProviderInstanceModel(providers, entry.instanceId) : undefined;
+  return entry && model ? { instanceId: entry.instanceId, model } : null;
 }

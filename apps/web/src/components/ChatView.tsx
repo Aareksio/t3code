@@ -2573,6 +2573,7 @@ export default function ChatView(props: ChatViewProps) {
   const composerBannerItems = (() => {
     const fallback =
       !isServerThread &&
+      multipleModelSelections === null &&
       !composerModelSelectionExplicit &&
       defaultModelResolution.fallback &&
       (!composerSelectedModelSelection ||

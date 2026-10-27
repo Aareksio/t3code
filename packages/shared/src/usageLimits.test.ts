@@ -164,6 +164,9 @@ describe("new thread model fallback", () => {
       "claude-opus-5-5",
     );
     expect(resolve(pools("antigravity", ["3p-weekly"]), "claude-opus-5-5")).toBe(fallback.model);
+    expect(resolve(pools("antigravity", ["gemini-weekly"]), "antigravity-default")).toBe(
+      fallback.model,
+    );
     expect(resolve(pools("opencode", ["go_weekly"]), "opencode/big-pickle")).toBe(
       "opencode/big-pickle",
     );

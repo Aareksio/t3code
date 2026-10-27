@@ -48,6 +48,7 @@ export function exhaustedUsageWindow(
         const pool = window.id.match(/^(gemini|claude|gpt|3p)-/)?.[1];
         return (
           pool === undefined ||
+          family === undefined ||
           pool === family ||
           (pool === "3p" && (family === "claude" || family === "gpt"))
         );

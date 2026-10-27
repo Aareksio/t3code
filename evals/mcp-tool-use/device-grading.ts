@@ -367,6 +367,8 @@ export function shellInvocations(
   let currentCertain = true;
   let currentUnmasked = true;
   let currentSequenced = false;
+  // After a certain `exit` or `return`, nothing later in its scope runs.
+  let exited = false;
   const append = (nested: ShellInvocation[]) =>
     actions.push(
       ...nested.map((action) => ({
@@ -487,7 +489,7 @@ export function shellInvocations(
     }
     const reachable =
       gate === "&&" ? status : gate === "||" ? (status === undefined ? undefined : !status) : true;
-    if (!active || !words.length || reachable === false) return;
+    if (!active || exited || !words.length || reachable === false) return;
     const list = listTokens();
     currentUnmasked = !list.includes("||") && words[0] !== "!";
     // The call's exit status is the last command's; an action followed by `;` or `&` doesn't own it.
@@ -532,6 +534,11 @@ export function shellInvocations(
     if (executable(words[0]) === "command" && /^-[vV]$/.test(words[1] ?? "")) return;
     while (words[0] === "!") words.shift();
     words = unwrap(words);
+    if (/^(?:exit|return)$/.test(executable(words[0]))) {
+      if (currentCertain) exited = true;
+      else certain = false;
+      return;
+    }
     const name = executable(words[0]);
     let input = body?.text ?? pipe;
     pipe = undefined;
@@ -624,7 +631,13 @@ export function shellInvocations(
       managed: agent && !remote && cli === "agent-device",
     });
   };
-  const scopes: Array<{ variables: Map<string, string>; active: boolean; certain: boolean }> = [];
+  const scopes: Array<{
+    variables: Map<string, string>;
+    active: boolean;
+    certain: boolean;
+    exited: boolean;
+    subshell: boolean;
+  }> = [];
   let comment = false;
   let redirect = false;
   let redirectOperands: string[] = [];
@@ -673,7 +686,7 @@ export function shellInvocations(
     if (/^(?:&&|\|\||[;\n&|(){}])$/.test(token)) {
       flush();
       if (token === "(" || token === "{") {
-        scopes.push({ variables, active, certain });
+        scopes.push({ variables, active, certain, exited, subshell: token === "(" });
         if (token === "(") variables = new Map(variables);
         const reachable =
           gate === "&&"
@@ -688,6 +701,8 @@ export function shellInvocations(
       }
       if (token === ")" || token === "}") {
         const scope = scopes.pop();
+        // A subshell's exit ends only the subshell; a group's ends the shell.
+        if (scope) exited = scope.exited || (!scope.subshell && exited);
         if (scope) ({ variables, active, certain } = scope);
       }
       if (token !== "|") pipe = undefined;
@@ -817,12 +832,16 @@ export function gradeDevice(expect: typeof DeviceExpect.Type | undefined, run: D
   if (expect.maxFailedAttemptsPerTurn !== undefined) {
     const failedByTurn = new Map<number, number>();
     for (const call of run.calls) {
-      if (!call.failed) continue;
       const actions = shell.find((entry) => entry.call === call)?.actions ?? [];
+      // A failed raw attempt, such as agent-device over ssh, is still a failed device attempt.
+      const device = actions.filter((action) => action.managed || action.raw).length;
+      // agent-device prints one error per failed command, even when a later command succeeds.
+      const errors = (call.output ?? "").match(new RegExp(AGENT_DEVICE_ERROR, "g"))?.length ?? 0;
       const attempts = call.tool.startsWith("device_")
-        ? 1
-        : // A failed raw attempt, such as agent-device over ssh, is still a failed device attempt.
-          Number(actions.some((action) => action.managed || action.raw));
+        ? Number(!!call.failed)
+        : call.failed && device
+          ? Math.max(1, Math.min(errors, device))
+          : Math.min(errors, device);
       const turn = call.turn ?? 0;
       failedByTurn.set(turn, (failedByTurn.get(turn) ?? 0) + attempts);
     }

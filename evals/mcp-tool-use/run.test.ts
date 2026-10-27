@@ -521,6 +521,7 @@ it.each([
   "if true; then echo ok; elif true; then xcrun simctl io PRIVATE screenshot /tmp/a.png; fi",
   "# shot() { xcrun simctl io PRIVATE screenshot /tmp/a.png; }\nshot",
   "echo ready # shot() { xcrun simctl io PRIVATE screenshot /tmp/a.png; }\nshot",
+  "exit 0; xcrun simctl io PRIVATE screenshot /tmp/a.png",
   "ssh build-mac agent-device --version",
   "ssh build-mac agent-device help longpress",
 ])("allows auxiliary shell work: %s", (command) => {
@@ -559,6 +560,7 @@ it.each([
   "ssh build-mac agent-device longpress @e1",
   "ssh build-mac /opt/homebrew/bin/agent-device batch --file /tmp/steps.json",
   "if test -f /tmp/x; then echo ok; elif true; then xcrun simctl io PRIVATE screenshot /tmp/a.png; fi",
+  "(exit 0); xcrun simctl io PRIVATE screenshot /tmp/a.png",
   // An uncertain short-circuit, and line continuations.
   "test -f /tmp/flag && true || xcrun simctl io PRIVATE screenshot /tmp/a.png",
   "ssh build-mac xcrun simctl io PRIVATE \\\n  screenshot /tmp/a.png",
@@ -1398,6 +1400,56 @@ it.each([
     pass,
   );
 });
+
+it.each([
+  [
+    "a certain exit before it",
+    "exit 0; LAUNCHER record start /tmp/demo/voice.mp4; LAUNCHER record stop",
+    false,
+  ],
+  [
+    "an exit confined to a subshell",
+    "(exit 0); LAUNCHER record start /tmp/demo/voice.mp4; LAUNCHER record stop",
+    true,
+  ],
+] as const)("credits a recording only when its commands are reachable: %s", (_, command, pass) => {
+  const launcher = "/home/user/.t3/userdata/device/bin/agent-device";
+  const calls = [
+    {
+      step: 0,
+      tool: "Bash",
+      failed: false,
+      output: "ok",
+      input: { command: command.replaceAll("LAUNCHER", launcher) },
+    },
+  ];
+  const run = {
+    calls,
+    launchers: [launcher],
+    text: "Saved /tmp/demo/voice.mp4",
+    stopReason: "end_turn",
+  };
+  const checks = gradeSample({ device: { recording: "/tmp/demo/voice.mp4" } }, run);
+  assert.equal(checks.find((check) => check.check.startsWith("device recording"))?.pass, pass);
+});
+
+it.each([
+  [
+    "three agent-device errors in one successful call",
+    "Error (COMMAND_FAILED): x\nError (COMMAND_FAILED): x\nError (COMMAND_FAILED): x\nok",
+    false,
+  ],
+  ["clean output", "snapshot ok\nsnapshot ok\nsnapshot ok\nok", true],
+] as const)(
+  "counts agent-device errors a later command masked toward the failure budget: %s",
+  (_, output, pass) => {
+    const launcher = "/home/user/.t3/userdata/device/bin/agent-device";
+    const command = `${launcher} snapshot; ${launcher} snapshot; ${launcher} snapshot; echo ok`;
+    const calls = [{ step: 0, tool: "Bash", failed: false, output, input: { command } }];
+    const checks = gradeDevice({ maxFailedAttemptsPerTurn: 2 }, { calls });
+    assert.equal(checks.find((c) => c.check.startsWith("maxCalls device"))?.pass, pass);
+  },
+);
 
 it("leaves errored samples out of pass rates and lists them in the summary", () => {
   const usage = { input: 10, output: 0, cacheWrite: 0, cacheRead: 0 };

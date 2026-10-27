@@ -450,6 +450,9 @@ it.each([
   ["Use device_open. Use ssh mac 'xcrun simctl io A screenshot /tmp/proof.png'.", "mixed"],
   // Live GPT briefs: "non-UI" and "without" restrict SSH rather than route UI through it.
   ["Use device_open. SSH is allowed only for the non-UI operations described above.", "managed"],
+  ["Use device_open. Screenshots via SSH are forbidden.", "managed"],
+  ["Use device_open. Taking screenshots over SSH is not allowed.", "managed"],
+  ["Using device_open is forbidden, use SSH for screenshots.", "raw"],
   [
     "Use device_open. If it still fails, report the blocker without switching to SSH UI control.",
     "managed",
@@ -1289,6 +1292,33 @@ it.each([
     const launcher = "/home/user/.t3/userdata/device/bin/agent-device";
     const calls = [
       { step: 0, tool: "Bash", failed: false, output, input: { command: `${launcher} ${start}` } },
+      { step: 1, tool: "Bash", failed: false, input: { command: `${launcher} record stop` } },
+    ];
+    const run = {
+      calls,
+      launchers: [launcher],
+      text: "Saved /tmp/demo/voice.mp4",
+      stopReason: "end_turn",
+    };
+    const checks = gradeSample({ device: { recording: "/tmp/demo/voice.mp4" } }, run);
+    assert.equal(checks.find((check) => check.check.startsWith("device recording"))?.pass, pass);
+  },
+);
+
+it.each([
+  ["clean output", "Recording started", true],
+  [
+    "an agent-device error the script ignored",
+    "Error (COMMAND_FAILED): Remote daemon is unavailable",
+    false,
+  ],
+] as const)(
+  "credits a recording a Python script started only with clean output: %s",
+  (_, output, pass) => {
+    const launcher = "/home/user/.t3/userdata/device/bin/agent-device";
+    const script = `python3 -c "import subprocess; subprocess.run(['${launcher}', 'record', 'start', '/tmp/demo/voice.mp4'])"`;
+    const calls = [
+      { step: 0, tool: "Bash", failed: false, output, input: { command: script } },
       { step: 1, tool: "Bash", failed: false, input: { command: `${launcher} record stop` } },
     ];
     const run = {

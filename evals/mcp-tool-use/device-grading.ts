@@ -57,6 +57,11 @@ export function briefRoute(text: string) {
     .replace(/[`*]/g, "")
     // "SSH for the non-UI operations" restricts SSH rather than routing UI through it.
     .replace(/\bnon-(?:ui|device|simulator|screen)\b/g, "auxiliary")
+    // "Screenshots via SSH are forbidden" negates its subject, within its comma segment.
+    .replace(
+      /[^.;,\n]*?\b(?:is|are)\s+(?:strictly\s+)?(?:forbidden|prohibited|disallowed|banned|not allowed|not permitted)\b/g,
+      "",
+    )
     .replace(/\b(?:do not|don't)\s+forget\s+to\b/g, "")
     .replace(/\b(?:do not|don't)\s+avoid\b/g, "use")
     .replace(/\b(?:should|must)\s+not\s+be\s+avoided\b/g, "is allowed")
@@ -311,6 +316,8 @@ function scriptInvocations(
         ...shellInvocations(program, new Map(variables), remote).map((action) => ({
           ...action,
           executed: action.executed && certain,
+          // A script's exit status needn't reflect its subprocesses (`subprocess.run` doesn't check).
+          sequenced: true,
         })),
       );
     }

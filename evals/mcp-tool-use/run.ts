@@ -11,7 +11,12 @@ import * as NodeVM from "node:vm";
 import * as NodeZlib from "node:zlib";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { DeviceSummary, OrchestratorMcpTaskRole, ProviderInstanceId } from "@t3tools/contracts";
+import {
+  DeviceOperationError,
+  DeviceSummary,
+  OrchestratorMcpTaskRole,
+  ProviderInstanceId,
+} from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -185,6 +190,18 @@ const McpToolUseWorld = Schema.StructWithRest(
     agentDeviceSessions: Schema.optional(
       Schema.Record(Schema.String, Schema.Struct({ app: Schema.optional(Schema.String) })),
     ),
+    /**
+     * Hosts whose hub fails to list devices, by id, with the error, such as F1's
+     * `{"_tag": "DeviceOperationError", "operation": "list", "reason": "request_failed", "cause": null}`.
+     * T3 marks each one failed on every call and lists none of its devices.
+     */
+    deviceDiscoveryFailures: Schema.optional(Schema.Record(Schema.String, DeviceOperationError)),
+    /** false: agent device access is off. T3 denies every device call and drops its device text. */
+    deviceAgentAccess: Schema.optional(Schema.Boolean),
+    /** Every capture reaches T3 with adb screencap's warning ahead of the PNG: T3 reports 0×0. */
+    deviceInvalidCapture: Schema.optional(Schema.Boolean),
+    /** Devices another thread's agent-device session holds, by device id: that thread's id. */
+    deviceOwners: Schema.optional(Schema.Record(Schema.String, Schema.String)),
   }),
   Rest,
 );
@@ -356,19 +373,28 @@ const hiddenFromSubagents = new Set(
 const visibleT3Tools = (subagent: boolean) =>
   subagent ? t3Tools.filter((tool) => !hiddenFromSubagents.has(tool.name)) : t3Tools;
 
-/** T3's Claude Code options for an eval thread: its system prompt append and its hooks. */
-const claudeQueryOptions = (model: Model) =>
-  makeClaudeQueryOptions({
+/**
+ * T3's Claude Code options for an eval thread: its system prompt append and its hooks. `device` says
+ * whether the thread holds the `device` capability, as agent device access decides.
+ */
+const claudeQueryOptions = (model: Model, device = true) => {
+  // Refs whose device text follows the capability read deviceToolsAvailable; older ones ignore it.
+  const input: Parameters<typeof makeClaudeQueryOptions>[0] & {
+    readonly deviceToolsAvailable?: boolean;
+  } = {
     modelSelection: { instanceId: ProviderInstanceId.make(CLAUDE_PROVIDER), model },
     nativeThreadId: "mcp-tool-use-eval",
     resume: false,
     cwd: null,
     mcpServers: { "t3-code": { type: "http", url: "http://127.0.0.1/mcp" } },
-  });
+    deviceToolsAvailable: device,
+  };
+  return makeClaudeQueryOptions(input);
+};
 
 /** Text T3 appends to Claude Code's system prompt. Delegated children get the same text. */
-export const t3SystemAppend = (model: Model) => {
-  const { systemPrompt } = claudeQueryOptions(model);
+export const t3SystemAppend = (model: Model, device = true) => {
+  const { systemPrompt } = claudeQueryOptions(model, device);
   if (isRecord(systemPrompt) && systemPrompt.type === "preset" && systemPrompt.append) {
     return systemPrompt.append;
   }
@@ -379,8 +405,10 @@ export const t3SystemAppend = (model: Model) => {
  * The context T3's SubagentStart hooks give a native subagent, which gets none of the append.
  * Empty when T3 registers no such hook.
  */
-export const t3SubagentContext = async (model: Model) => {
-  const hooks = (claudeQueryOptions(model).hooks?.SubagentStart ?? []).flatMap((m) => m.hooks);
+export const t3SubagentContext = async (model: Model, device = true) => {
+  const hooks = (claudeQueryOptions(model, device).hooks?.SubagentStart ?? []).flatMap(
+    (m) => m.hooks,
+  );
   const input = {
     hook_event_name: "SubagentStart" as const,
     session_id: "mcp-tool-use-eval",
@@ -450,6 +478,8 @@ export const buildBase = (
     readonly subagent?: boolean;
     /** A native subagent starts from its task: T3 appends nothing to its system prompt. */
     readonly nativeSubagent?: boolean;
+    /** false: the thread has no agent device access, so T3's text leaves devices out. */
+    readonly deviceAccess?: boolean;
   },
 ) => {
   const t3 = visibleT3Tools(options.subagent === true);
@@ -468,7 +498,7 @@ export const buildBase = (
   const nativeDeferred = deferredList.split("\n").filter((name) => name && !isT3Name(name));
   const names = [...nativeDeferred, ...t3.map((tool) => tool.name)].toSorted().join("\n");
   const { model } = options;
-  const append = options.nativeSubagent ? "" : t3SystemAppend(model);
+  const append = options.nativeSubagent ? "" : t3SystemAppend(model, options.deviceAccess);
   const modelLine = `You are powered by the model named ${MODELS[model]}. The exact model ID is ${model}.`;
   const joined = systemTexts.join("\n");
   // The capture's home directory names its user. Cases use `/home/user` paths instead.
@@ -529,6 +559,8 @@ const buildCodexBase = (
     readonly keepUserInstructions: boolean;
     readonly effort?: string | undefined;
     readonly subagent?: boolean;
+    /** false: the thread has no agent device access, so T3's text leaves devices out. */
+    readonly deviceAccess?: boolean;
   },
 ): Base => {
   const t3 = visibleT3Tools(options.subagent === true);
@@ -564,7 +596,7 @@ const buildCodexBase = (
   });
   const context = buildCodexAdditionalContext(
     { model: options.model, reasoningEffort: effort },
-    { browser: true, device: true },
+    { browser: true, device: options.deviceAccess ?? true },
   );
   input.push(
     ...Object.entries(context).map(([key, entry]) => message(`<${key}>${entry.value}</${key}>`)),
@@ -709,9 +741,8 @@ export const makeSample = (testCase: McpToolUseCase, base: Base): Sample => {
 export const withDevices = Effect.fn("evaluateMcpToolUse.withDevices")(function* (sample: Sample) {
   const world = sample.testCase.setup.world;
   if (world?.devices === undefined) return;
-  const { devices, deviceHosts, agentDeviceSessions } = world;
   sample.devices = yield* makeDeviceTools(
-    { devices, deviceHosts, agentDeviceSessions },
+    { ...world, devices: world.devices },
     sample.base.environment,
   );
   for (const call of (sample.testCase.setup.priorTurns ?? []).flatMap((t) => t.toolCalls ?? [])) {
@@ -1092,7 +1123,14 @@ export const shellRequest = (sample: Sample, call: Omit<ShellEntry, "output">, m
     ...(launchers.length > 0
       ? [`agent-device launchers T3's device_open returned: ${launchers.join(", ")}`]
       : []),
-    ...(sessions?.size ? [`Their agent-device sessions: ${describeSessions(sessions)}.`] : []),
+    ...(sessions?.size
+      ? [`Their agent-device sessions: ${describeSessions(sessions, devices?.owners)}.`]
+      : []),
+    ...(world?.deviceInvalidCapture
+      ? [
+          "T3's device_screenshot gets each capture with adb screencap's multi-display warning ahead of the PNG, so it reports 0×0. agent-device's own screenshot finds the PNG and is unaffected.",
+        ]
+      : []),
     ...(context ? [`The agent was told: ${context}`] : []),
     `The agent's task: ${testCase.prompt}`,
   ];
@@ -1904,6 +1942,7 @@ const main = Effect.gen(function* () {
   const keepUserInstructions = flags["user-instructions"] === "keep";
   const buildFor = (
     role: McpToolUseCase["setup"]["role"],
+    deviceAccess: boolean,
   ): Effect.Effect<Base, Schema.SchemaError> =>
     codex
       ? decodeCodexCapture(template).pipe(
@@ -1913,33 +1952,38 @@ const main = Effect.gen(function* () {
               keepUserInstructions,
               effort: flags.effort,
               subagent: role === "delegated-child",
+              deviceAccess,
             }),
           ),
         )
       : decodeCapture(template).pipe(
-          Effect.map((capture) =>
-            buildBase(capture.request.provider_native, {
+          Effect.flatMap((capture) => {
+            const built = buildBase(capture.request.provider_native, {
               model: flags.model,
               keepUserInstructions,
               subagent: role === "delegated-child",
               nativeSubagent: role === "native-subagent",
-            }),
-          ),
+              deviceAccess,
+            });
+            return role === "native-subagent"
+              ? Effect.promise(() => t3SubagentContext(flags.model, deviceAccess)).pipe(
+                  Effect.map((subagentContext): Base => ({ ...built, subagentContext })),
+                )
+              : Effect.succeed(built);
+          }),
         );
-  const base = yield* buildFor("top");
-  const childBase = yield* buildFor("delegated-child");
-  const nativeBase: Base = codex
-    ? base
-    : {
-        ...(yield* buildFor("native-subagent")),
-        subagentContext: yield* Effect.promise(() => t3SubagentContext(flags.model)),
-      };
-  const baseFor = ({ setup }: McpToolUseCase) =>
-    setup.role === "delegated-child"
-      ? childBase
-      : setup.role === "native-subagent"
-        ? nativeBase
-        : base;
+  // Codex has no native subagents; its cases with that role run as top-level threads.
+  const baseKey = ({ setup }: McpToolUseCase) =>
+    `${codex && setup.role === "native-subagent" ? "top" : setup.role}:${setup.world?.deviceAgentAccess !== false}`;
+  const base = yield* buildFor("top", true);
+  const bases = new Map<string, Base>([["top:true", base]]);
+  for (const testCase of selected) {
+    const key = baseKey(testCase);
+    if (bases.has(key)) continue;
+    const [role = "top", access] = key.split(":") as [McpToolUseCase["setup"]["role"], string];
+    bases.set(key, yield* buildFor(role, access === "true"));
+  }
+  const baseFor = (testCase: McpToolUseCase) => bases.get(baseKey(testCase)) ?? base;
   const effort = flags.effort ?? base.codex?.reasoning.effort ?? "high";
   if (flags["dry-run"]) {
     // One JSON line per case. Without --case this also checks that every case builds.
@@ -1947,8 +1991,8 @@ const main = Effect.gen(function* () {
       const sample = makeSample(testCase, baseFor(testCase));
       yield* Effect.scoped(withDevices(sample));
       const messages = buildMessages(sample);
-      const body = base.codex
-        ? codexRequest(base, codexMessages(messages))
+      const body = sample.base.codex
+        ? codexRequest(sample.base, codexMessages(messages))
         : requestBody(sample, effort, messages);
       process.stdout.write(`${yield* encodeJson(body)}\n`);
     }

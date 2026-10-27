@@ -10,6 +10,7 @@ import {
   AGENT_DEVICE_SHELL,
   agentDeviceSessionError,
   agentDeviceSessions,
+  describeSessions,
   deviceFailure,
   type LauncherTarget,
   launcherHelp,
@@ -27,6 +28,7 @@ import {
   t3SystemAppend,
   withDevices,
 } from "./run.ts";
+import { DeviceOperationError, LOCAL_DEVICE_HOST_ID } from "@t3tools/contracts";
 
 const MAC = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const IPHONE = "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB";
@@ -243,6 +245,9 @@ const NO_SESSION =
   "Error (SESSION_NOT_FOUND): No active session. Run open first.\nHint: Run open first or pass an explicit device selector.";
 const APP_RECORDING_BEFORE_OPEN =
   "Error (INVALID_ARGS): record start with app scope and an explicit session requires an active app session; run open <app> first, or use --scope device to record the full screen\nHint: Check command arguments and run --help for usage examples.";
+/** agent-device 0.21.31's snapshot-runtime-binding refusal, with the CLI's default hint. */
+const iosSnapshotRefused = (session: string) =>
+  `Error (SESSION_NOT_FOUND): iOS snapshot requires an active app session on the target device. Run open first (for example: open --session ${session} --platform ios --device "<name>" <app>).\nHint: Run open first or pass an explicit device selector.`;
 const APP_RECORDING_WITHOUT_APP =
   "Error (UNKNOWN): App-scoped recording requires an active app session; open the app under test before recording.\nHint: Unexpected internal error. Retry with --debug and report the diagnostics log if it persists.";
 
@@ -273,12 +278,13 @@ it.effect("answers the returned launcher as agent-device does before and after o
       assert.include(answer(args), NO_SESSION, args);
     }
     assert.include(answer("record start /tmp/run.mp4"), APP_RECORDING_BEFORE_OPEN);
+    // An iOS snapshot needs an app open in the session.
+    assert.include(answer("snapshot -i"), iosSnapshotRefused("sim"));
     // With the device selector both refs pass, these run without a session.
     for (const args of [
       "open",
       "devices",
       "apps",
-      "snapshot -i",
       "settings appearance dark",
       "alert accept",
       "install com.acme.app /tmp/Acme.app",
@@ -299,8 +305,10 @@ it.effect("answers the returned launcher as agent-device does before and after o
     assert.isUndefined(answer("press @e3"));
     assert.include(answer("record start /tmp/run.mp4"), APP_RECORDING_WITHOUT_APP);
     assert.isUndefined(answer("record start --scope device /tmp/run.mp4"));
+    assert.include(answer("snapshot -i"), iosSnapshotRefused(session));
     ran("open com.acme.app", "Opened: com.acme.app");
     assert.isUndefined(answer("record start /tmp/run.mp4"));
+    assert.isUndefined(answer("snapshot -i"));
     assert.deepEqual([...tools.sessions(history)], [[session, { app: true }]]);
     ran("close", "Closed");
     assert.include(
@@ -315,6 +323,7 @@ const shared = (session: string): LauncherTarget => ({
   session,
   bound: false,
   deviceId: IPHONE,
+  ios: true,
   iosSimulator: true,
 });
 const boundTarget: LauncherTarget = {
@@ -322,6 +331,7 @@ const boundTarget: LauncherTarget = {
   session: "t3-bound",
   bound: true,
   deviceId: IPHONE,
+  ios: true,
   iosSimulator: true,
 };
 const bash = (command: string, output = "OK"): ShellCall => ({
@@ -395,8 +405,14 @@ it("follows the session through aliases, compound calls, snapshots and whole-scr
   assert.isUndefined(after(bash(`false && ${launcher} open`, "Exit code 1")));
   assert.isUndefined(after(bash("ssh build-mac agent-device open com.acme.app")));
   assert.isUndefined(after(bash(`${launcher} help open`)));
-  // agent-device publishes a session for a sessionless snapshot, without an app.
-  assert.deepEqual(after(bash(`${launcher} snapshot -i`)), { app: false });
+  // agent-device publishes a session for a sessionless Android snapshot, without an app. An iOS
+  // snapshot without an app fails and starts nothing.
+  assert.isUndefined(after(bash(`${launcher} snapshot -i`)));
+  const android = { ...boundTarget, ios: false, iosSimulator: false };
+  assert.deepEqual(
+    agentDeviceSessions([android], {}, [bash(`${launcher} snapshot -i`)]).get("t3-bound"),
+    { app: false },
+  );
   // A whole-screen recording holds a session only until it stops.
   const recording = bash(`${launcher} record start --scope device /tmp/r.mp4`);
   assert.deepEqual(after(recording), { app: false, recordingOnly: true });
@@ -424,7 +440,7 @@ it("follows the shared launcher's session through flags held in a variable or an
     "Opened: com.acme.app",
   );
   assert.deepEqual(after(opened), { app: true });
-  const array = bash(`A=(${flags}); ${target.command} snapshot -i "\${A[@]}" 2>&1 | head -60`);
+  const array = bash(`A=(${flags}); ${target.command} open "\${A[@]}" 2>&1 | head -60`);
   assert.deepEqual(after(array), { app: false });
   // With two sessions behind the shared launcher, unread flags name neither.
   assert.isUndefined(after(array, [target, shared("t3-b")]));
@@ -484,7 +500,7 @@ it.effect(
         JSON.stringify(
           shellRequest(sample, { tool: "Bash", input: {} }, "claude-haiku-5-5").messages,
         );
-      assert.include(told(), "has not started; no open or snapshot has run in it");
+      assert.include(told(), "has not started");
       assert.include(cannedOutput(sample, `${command} screenshot /tmp/a.png${flags}`), NO_SESSION);
       assert.match(cannedOutput(sample, `${command} help record`) ?? "", /^Usage:/);
       assert.isUndefined(cannedOutput(sample, `${command} open com.acme.app${flags}`));
@@ -507,4 +523,241 @@ it.effect(
       assert.isUndefined(cannedOutput(sample, `${command} screenshot /tmp/a.png${flags}`));
       assert.include(told(), "is open with an app");
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it("keeps a redirection's descriptor out of the app an open names, on either launcher", () => {
+  // Sol R10 B1: `open 2>&1` once read as `open 2`, an app the real shell never passes.
+  const flags = `--platform ios --udid ${IPHONE} --config /home/user/.t3/userdata/device/hosts/x.json --session t3-a`;
+  for (const [target, args] of [
+    [shared("t3-a"), ` ${flags}`],
+    [boundTarget, ""],
+  ] as const) {
+    for (const redirect of ["2>&1", "2>&1 | tail -5", "2>/dev/null"]) {
+      const opened = [
+        bash(`${target.command} open${args} ${redirect}`, `Opened: ${target.session}`),
+      ];
+      assert.deepEqual(
+        agentDeviceSessions([target], {}, opened).get(target.session),
+        { app: false },
+        redirect,
+      );
+      assert.equal(
+        errorCode([target], opened, `${target.command} record start /tmp/run.mp4${args}`),
+        "UNKNOWN",
+        redirect,
+      );
+    }
+  }
+});
+
+it("follows opens the parser cannot prove ran, in calls that did not fail", () => {
+  // Opus R10 B1(b): shapes from run 5, where `&&` before `;` leaves an open uncertain.
+  const launcher = boundTarget.command;
+  const after = (command: string, output = "Opened: com.acme.app") =>
+    agentDeviceSessions([boundTarget], {}, [bash(command, output)]).get("t3-bound");
+  assert.deepEqual(
+    after(`mkdir -p /tmp/p && ${launcher} open com.acme.app 2>&1 | tail -3; echo done`),
+    { app: true },
+  );
+  assert.deepEqual(after(`cd /tmp && ${launcher} open com.acme.app; ${launcher} snapshot -i`), {
+    app: true,
+  });
+  // The launcher alias such a call sets, too, here and in later calls.
+  assert.deepEqual(after(`mkdir -p /tmp/p && AD=${launcher}; $AD open com.acme.app`), {
+    app: true,
+  });
+  assert.deepEqual(after(`mkdir -p /tmp/p && AD="${launcher}"; "\${AD}" open com.acme.app`), {
+    app: true,
+  });
+  assert.deepEqual(
+    agentDeviceSessions([boundTarget], {}, [
+      bash(`cd /tmp && AD=${launcher}; echo ready`),
+      bash("$AD open com.acme.app"),
+    ]).get("t3-bound"),
+    { app: true },
+  );
+  // A failed call credits only what certainly ran.
+  assert.isUndefined(
+    after(`mkdir -p /tmp/p && ${launcher} open com.acme.app; echo done`, "Exit code 1\nno"),
+  );
+  assert.isUndefined(
+    after(`mkdir -p /tmp/p && AD=${launcher}; $AD open com.acme.app`, "Exit code 1\nno"),
+  );
+});
+
+const SPARE_MAC = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const SPARE_PHONE = "DDDDDDDD-DDDD-4DDD-8DDD-DDDDDDDDDDDD";
+const twoMacs = {
+  devices: [
+    ...world.devices,
+    { ...world.devices[0]!, hostId: SPARE_MAC, id: SPARE_PHONE, name: "Acme Spare iPhone" },
+  ],
+  deviceHosts: { ...world.deviceHosts, [SPARE_MAC]: "spare-mac" },
+};
+const deviceTools = (extra: object) =>
+  makeDeviceTools(
+    { ...twoMacs, ...extra } as Parameters<typeof makeDeviceTools>[0],
+    base.environment,
+  );
+
+it.effect("lists a host whose discovery fails as T3 does: failed, with none of its devices", () =>
+  Effect.gen(function* () {
+    // F1's saved device_list: the hub answered, but its device list timed out.
+    const failure = new DeviceOperationError({
+      operation: "list",
+      reason: "request_failed",
+      cause: null,
+    });
+    const tools = yield* deviceTools({ deviceDiscoveryFailures: { [MAC]: failure } });
+    const listed = json((yield* tools.call("device_list", {})).text);
+    assert.deepEqual(listed.hostStatuses[MAC], {
+      status: "failed",
+      detail:
+        "Device list failed: Could not communicate with device support. Try refreshing devices.",
+    });
+    assert.equal(listed.hostStatuses[SPARE_MAC].status, "ready");
+    assert.deepEqual(
+      listed.devices.map((device: { id: string }) => device.id),
+      [SPARE_PHONE],
+    );
+    const opened = yield* tools.call("device_open", { hostId: MAC, deviceId: IPHONE });
+    assert.isTrue(opened.isError);
+    assert.include(opened.text, IPHONE);
+    assert.isFalse(
+      (yield* tools.call("device_open", { hostId: SPARE_MAC, deviceId: SPARE_PHONE })).isError,
+    );
+    // A failed host with no devices of its own still needs its label.
+    const unlabeled = yield* Effect.exit(
+      deviceTools({ deviceDiscoveryFailures: { "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee": failure } }),
+    );
+    assert.isTrue(unlabeled._tag === "Failure");
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("denies every device tool with T3's own error when agent device access is off", () =>
+  Effect.gen(function* () {
+    const tools = yield* deviceTools({ deviceAgentAccess: false });
+    for (const [name, input] of [
+      ["device_list", {}],
+      ["device_open", { hostId: MAC, deviceId: IPHONE }],
+      ["device_screenshot", {}],
+      ["device_close", {}],
+    ] as const) {
+      const result = yield* tools.call(name, input);
+      assert.isTrue(result.isError, name);
+      // Refs before typed screenshot errors print their generic screenshot failure instead.
+      assert.oneOf(
+        result.text,
+        [
+          "Agent device access is turned off for this environment.",
+          ...(name === "device_screenshot" ? ["Device screenshot failed."] : []),
+        ],
+        name,
+      );
+    }
+    // T3 drops its device text for a thread without the capability, on refs that have it.
+    assert.notInclude(t3SystemAppend(model, false), "## T3 Code devices");
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("reports an unreadable capture as T3 does: a successful 0×0 screenshot", () =>
+  Effect.gen(function* () {
+    const tools = yield* deviceTools({ deviceInvalidCapture: true });
+    yield* tools.call("device_open", { hostId: MAC, deviceId: IPHONE });
+    const shot = yield* tools.call("device_screenshot", {});
+    assert.isFalse(shot.isError);
+    assert.deepEqual(json(shot.text).screenshot, { mimeType: "image/png", width: 0, height: 0 });
+    const sample = makeSample(
+      deviceCase({ world: { ...world, deviceInvalidCapture: true } }),
+      base,
+    );
+    yield* withDevices(sample);
+    const told = JSON.stringify(shellRequest(sample, { tool: "Bash", input: {} }, model).messages);
+    assert.include(told, "agent-device's own screenshot finds the PNG and is unaffected");
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("refuses an open on a device another thread's agent-device session holds", () =>
+  Effect.gen(function* () {
+    const tools = yield* deviceTools({ deviceOwners: { [IPHONE]: "acme-design-review" } });
+    // T3 names the owner's session as it names every thread's.
+    const owner = "t3-a062c547ef0b6bf8ee839b67";
+    assert.deepEqual(tools.owners, [
+      { deviceId: IPHONE, threadId: "acme-design-review", session: owner },
+    ]);
+    // T3 has no cross-thread gate: device_open succeeds, and device_list shows only this thread.
+    const opened = json((yield* tools.call("device_open", { hostId: MAC, deviceId: IPHONE })).text);
+    assert.deepEqual(json((yield* tools.call("device_list", {})).text).open, [
+      { hostId: MAC, deviceId: IPHONE },
+    ]);
+    const { command, targetArgs, session: bound } = opened.agentDevice;
+    const own: string = bound ?? targetArgs[targetArgs.indexOf("--session") + 1];
+    const target = (session = own) =>
+      bound === undefined
+        ? targetArgs.map((arg: string) => (arg === own ? session : arg)).join(" ")
+        : session === own
+          ? ""
+          : `--session ${session}`;
+    const line = (args: string, session?: string) => `${command} ${args} ${target(session)}`.trim();
+    const history: Array<ShellCall> = [];
+    const answer = (args: string, session?: string) =>
+      tools.sessionError(history, line(args, session)) ?? "";
+    const inUse = `Error (DEVICE_IN_USE): Device is already in use by session "${owner}".\nHint: Run agent-device session list to inspect active sessions. To reuse this device, rerun the command with --session ${owner}. To open a new session on this device, first run agent-device close --session ${owner}.`;
+    assert.include(
+      answer("open com.acme.app"),
+      `${inUse} To wait for the device to free up, run the same open with --wait <ms>.\nDiagnostic ID: `,
+    );
+    assert.include(
+      answer("open --wait 5000"),
+      `Error (DEVICE_IN_USE): Device is already in use by session "${owner}".\nHint: Waited 5000ms for this device and it stayed busy. Run agent-device session list`,
+    );
+    assert.notInclude(answer("open --wait 5000"), "--wait <ms>");
+    // The hint's reuse works, in the other thread's session.
+    assert.equal(answer("screenshot /tmp/a.png", owner), "");
+    assert.equal(answer("open com.acme.app", owner), "");
+    // A failed open starts nothing, in a compound call too.
+    history.push({
+      tool: "Bash",
+      input: { command: `${line("open com.acme.app")} && ${line("screenshot /tmp/a.png")}` },
+      output: "Exit code 1\nError (DEVICE_IN_USE): Device is already in use",
+    });
+    assert.deepEqual(
+      [...tools.sessions(history)],
+      [
+        [own, undefined],
+        [owner, { app: true }],
+      ],
+    );
+    const sample = makeSample(
+      deviceCase({ world: { ...twoMacs, deviceOwners: { [IPHONE]: "acme-design-review" } } }),
+      base,
+    );
+    yield* withDevices(sample);
+    const told = JSON.stringify(shellRequest(sample, { tool: "Bash", input: {} }, model).messages);
+    assert.include(told, `${owner} belongs to another T3 thread (acme-design-review)`);
+    // Closing the owner's session frees the device.
+    history.push({ tool: "Bash", input: { command: line("close", owner) }, output: "Closed" });
+    assert.equal(answer("open com.acme.app"), "");
+    assert.include(describeSessions(tools.sessions(history), tools.owners), "was closed");
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("leaves a free device free when another thread holds a different one", () =>
+  Effect.gen(function* () {
+    const tools = yield* deviceTools({ deviceOwners: { [IPHONE]: "acme-design-review" } });
+    const opened = json(
+      (yield* tools.call("device_open", { hostId: SPARE_MAC, deviceId: SPARE_PHONE })).text,
+    );
+    const { command, targetArgs, session } = opened.agentDevice;
+    const flags = session === undefined ? ` ${targetArgs.join(" ")}` : "";
+    assert.isUndefined(tools.sessionError([], `${command} open com.acme.app${flags}`));
+    assert.include(
+      tools.sessionError([], `${command} screenshot /tmp/a.png${flags}`) ?? "",
+      "SESSION_NOT_FOUND",
+    );
+    // The local host always exists and holds none of the world's devices.
+    assert.isFalse(
+      (yield* tools.call("device_list", {})).text.includes(`"hostId":"${LOCAL_DEVICE_HOST_ID}"`),
+    );
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

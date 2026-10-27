@@ -55,7 +55,6 @@ import { changeRequestsCreatedBy } from "../../apps/server/src/orchestration-v2/
 import { DeviceExpect, gradeDevice } from "./device-grading.ts";
 import {
   AGENT_DEVICE_SHELL,
-  describeSessions,
   deviceFailure,
   type DeviceTools,
   isDeviceTool,
@@ -1111,8 +1110,7 @@ export const shellRequest = (sample: Sample, call: Omit<ShellEntry, "output">, m
   const { testCase, base, repo, shell, devices } = sample;
   const { world, context, shellMocks = [] } = testCase.setup;
   const { cwd, platform, date } = base.environment;
-  const launchers = [...new Set(devices?.launchers)];
-  const sessions = devices?.sessions(shell);
+  const command = call.tool === "Bash" && isRecord(call.input) ? call.input.command : undefined;
   const machine = [
     `Working directory: ${cwd} on ${platform}, a git checkout of github.com/${repo}.${date ? ` Today is ${date}.` : ""}`,
     gitStatus(testCase),
@@ -1120,12 +1118,8 @@ export const shellRequest = (sample: Sample, call: Omit<ShellEntry, "output">, m
     ...(shellMocks.length > 0
       ? [`Commands that match these regexes print exactly this output: ${valueText(shellMocks)}`]
       : []),
-    ...(launchers.length > 0
-      ? [`agent-device launchers T3's device_open returned: ${launchers.join(", ")}`]
-      : []),
-    ...(sessions?.size
-      ? [`Their agent-device sessions: ${describeSessions(sessions, devices?.owners)}.`]
-      : []),
+    // Which device each launcher and session drives, and which of this call's opens are refused.
+    ...(devices?.describe(shell, typeof command === "string" ? command : undefined) ?? []),
     ...(world?.deviceInvalidCapture
       ? [
           "T3's device_screenshot gets each capture with adb screencap's multi-display warning ahead of the PNG, so it reports 0×0. agent-device's own screenshot finds the PNG and is unaffected.",

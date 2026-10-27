@@ -734,7 +734,10 @@ it.effect("refuses an open on a device another thread's agent-device session hol
     );
     yield* withDevices(sample);
     const told = JSON.stringify(shellRequest(sample, { tool: "Bash", input: {} }, model).messages);
-    assert.include(told, `${owner} belongs to another T3 thread (acme-design-review)`);
+    assert.include(
+      told,
+      `${owner} (Acme iPhone, ${IPHONE}, on build-mac) belongs to another T3 thread (acme-design-review)`,
+    );
     // Closing the owner's session frees the device.
     history.push({ tool: "Bash", input: { command: line("close", owner) }, output: "Closed" });
     assert.equal(answer("open com.acme.app"), "");
@@ -761,3 +764,143 @@ it.effect("leaves a free device free when another thread holds a different one",
     );
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
+
+type Opened = { command: string; targetArgs: Array<string>; session?: string };
+/** This ref's command line for a launcher: a bound one needs no flags; the shared one takes them. */
+const commandLine = (opened: Opened, args: string, session?: string) => {
+  const own = opened.session ?? opened.targetArgs[opened.targetArgs.indexOf("--session") + 1];
+  if (opened.session !== undefined)
+    return `${opened.command} ${args}${session === undefined ? "" : ` --session ${session}`}`;
+  const flags = opened.targetArgs.map((arg) => (arg === own && session ? session : arg));
+  return `${opened.command} ${args} ${flags.join(" ")}`;
+};
+
+it.effect(
+  "tells the simulator each launcher's device, and routes DEVICE_IN_USE to the held one",
+  () =>
+    Effect.gen(function* () {
+      // Opus R11-B3(a): in run 6 the simulator gave the free spare's plain open the owner's
+      // DEVICE_IN_USE twice. It could not tell which device a flagless bound launcher drives.
+      const owner = "t3-a062c547ef0b6bf8ee839b67";
+      const sample = makeSample(
+        deviceCase({ world: { ...twoMacs, deviceOwners: { [IPHONE]: "acme-design-review" } } }),
+        base,
+      );
+      yield* withDevices(sample);
+      const tools = sample.devices!;
+      const open = (hostId: string, deviceId: string) =>
+        Effect.map(
+          tools.call("device_open", { hostId, deviceId }),
+          (result): Opened => json(result.text).agentDevice,
+        );
+      const held = yield* open(MAC, IPHONE);
+      const spare = yield* open(SPARE_MAC, SPARE_PHONE);
+      const session = (opened: Opened) =>
+        opened.session ?? opened.targetArgs[opened.targetArgs.indexOf("--session") + 1];
+      const told = (command: string) =>
+        String(
+          shellRequest(sample, { tool: "Bash", input: { command } }, model).messages[0]?.content[0]
+            ?.text,
+        );
+      // Run 6's history: the held device's plain open, refused without the simulator.
+      const heldOpen = commandLine(held, "open com.acme.app --metro-port 8095");
+      const refused = cannedOutput(sample, heldOpen) ?? "";
+      assert.include(
+        refused,
+        `Error (DEVICE_IN_USE): Device is already in use by session "${owner}".`,
+      );
+      sample.shell.push({ tool: "Bash", input: { command: heldOpen }, output: refused });
+
+      // The spare's plain open goes to the simulator, which now knows it drives the free spare.
+      const spareOpen = commandLine(spare, "open com.acme.app --metro-port 8095");
+      assert.isUndefined(cannedOutput(sample, spareOpen));
+      const free = told(spareOpen);
+      assert.include(
+        free,
+        `agent-device launchers T3's device_open returned: ${
+          held.session === undefined
+            ? `${held.command} (shared: each command's --udid or --serial and --session name its device and session)`
+            : `${held.command} (drives Acme iPhone, ${IPHONE}, on build-mac, in session ${held.session}); ${spare.command} (drives Acme Spare iPhone, ${SPARE_PHONE}, on spare-mac, in session ${spare.session})`
+        }`,
+      );
+      assert.include(
+        free,
+        `${session(held)} (Acme iPhone, ${IPHONE}, on build-mac) has not started; ${session(spare)} (Acme Spare iPhone, ${SPARE_PHONE}, on spare-mac) has not started; ${owner} (Acme iPhone, ${IPHONE}, on build-mac) belongs to another T3 thread (acme-design-review) and holds its device with an app open.`,
+      );
+      assert.include(
+        free,
+        `In the new call, \`${spareOpen}\` drives Acme Spare iPhone, ${SPARE_PHONE}, on spare-mac, which no other session holds: it prints no DEVICE_IN_USE.`,
+      );
+      assert.notInclude(free, "Error (DEVICE_IN_USE)");
+
+      // A compound open of the held device gets agent-device's exact refusal, for that open only.
+      const piped = commandLine(held, "open com.acme.app");
+      const refusal = told(`${piped} 2>&1 | tail -5`);
+      assert.include(
+        refusal,
+        `In the new call, \`${piped}\` drives Acme iPhone, ${IPHONE}, on build-mac, which session ${owner} holds: it fails with exit code 1, printing "Error (DEVICE_IN_USE): Device is already in use by session "${owner}"." and "Hint: Run agent-device session list to inspect active sessions. To reuse this device,`,
+      );
+      assert.notInclude(refusal, "no other session holds");
+      // One call may try the held device, then fall back to the spare through an alias.
+      const alias =
+        spare.session === undefined
+          ? `A=${spare.command}; "$A" open com.acme.app ${spare.targetArgs.join(" ")}`
+          : `A=${spare.command}; "$A" open com.acme.app`;
+      const both = told(`${piped} || echo busy; ${alias}`);
+      assert.include(both, `which session ${owner} holds: it fails with exit code 1`);
+      assert.include(
+        both,
+        `on spare-mac, which no other session holds: it prints no DEVICE_IN_USE`,
+      );
+      // An open in the other thread's own session is not refused, and gets no route.
+      assert.notInclude(told(commandLine(held, "open com.acme.app", owner)), "In the new call");
+      // Neither do commands other than open.
+      assert.notInclude(
+        told(`${commandLine(spare, "screenshot /tmp/a.png")} && echo ok`),
+        "In the new call",
+      );
+
+      // A world where no other thread holds a device gets no route either.
+      const alone = makeSample(deviceCase({}), base);
+      yield* withDevices(alone);
+      const own: Opened = json(
+        (yield* alone.devices!.call("device_open", { hostId: MAC, deviceId: IPHONE })).text,
+      ).agentDevice;
+      const request = shellRequest(
+        alone,
+        { tool: "Bash", input: { command: `${commandLine(own, "open com.acme.app")} | tail -3` } },
+        model,
+      );
+      assert.notInclude(JSON.stringify(request.messages), "In the new call");
+      assert.include(
+        JSON.stringify(request.messages),
+        `${session(own)} (Acme iPhone, ${IPHONE}, on build-mac) has not started`,
+      );
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it("tells the simulator 0.21.31's --foreground and session list behaviour", () => {
+  // Opus R11-B3(b): 0.21.31 (session2.js ys) refuses only an open --foreground with no app or URL.
+  // Run 6's simulator refused `open <app> --foreground` in 9 base samples.
+  assert.include(
+    AGENT_DEVICE_SHELL,
+    "open --foreground with no app or URL fails with exit code 1 when the command passes --udid or --device",
+  );
+  assert.include(AGENT_DEVICE_SHELL, "open <app> --foreground works.");
+  // Run 6's simulator answered the DEVICE_IN_USE hint's `session list` with "Unknown command".
+  assert.include(
+    AGENT_DEVICE_SHELL,
+    "session list prints, as JSON, the started sessions on the launcher's host, other threads' too",
+  );
+  // Neither is refused without the simulator.
+  for (const args of ["open com.acme.app --foreground", "session list"]) {
+    assert.isUndefined(
+      agentDeviceSessionError(
+        [boundTarget],
+        new Map([["t3-bound", undefined]]),
+        `${boundTarget.command} ${args}`,
+      ),
+      args,
+    );
+  }
+});

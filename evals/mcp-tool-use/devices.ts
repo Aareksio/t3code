@@ -110,6 +110,14 @@ export interface DeviceTools {
   ) => ReadonlyMap<string, AgentDeviceSession | undefined>;
   /** agent-device's error for a plain launcher command that needs a session it has not started. */
   readonly sessionError: (history: ReadonlyArray<ShellCall>, command: string) => string | undefined;
+  /**
+   * What the shell simulator is told of the launchers, their devices and sessions, and of the
+   * launcher opens in a new call that another thread's session refuses.
+   */
+  readonly describe: (
+    history: ReadonlyArray<ShellCall>,
+    command: string | undefined,
+  ) => ReadonlyArray<string>;
 }
 
 export const isDeviceTool = (name: string) => Object.hasOwn(DeviceToolkit.tools, name);
@@ -168,7 +176,7 @@ export const AGENT_DEVICE_SHELL = [
   'The description lists the agent-device launchers T3 Code\'s device_open returned. Each is a file on the agent\'s machine, not on SSH hosts. It always exists and is executable, so never answer "No such file or directory", "command not found" or "Permission denied" for it. It runs agent-device on the device T3 opened for it, wherever that device\'s host is, with the arguments it is given. Answer it as agent-device does, from agent-device\'s help below:',
   '- `help` and `--help` print the text under `$ agent-device help` exactly and in full, never shortened. `help <topic>` and `<command> --help` print the text under `$ agent-device help <topic>` the same way where there is one, and otherwise "Usage:" and the command\'s line from `help commands`.',
   '- Only the commands and flags in this help exist. Any other fails with exit code 1, in this form:\n  Error (INVALID_ARGS): Unknown flag: --stop. Did you mean --scope?\n  Hint: Check command arguments and run --help for usage examples.\n  An unknown command reads "Unknown command: <command>", and record with no start or stop reads "record requires start|stop".',
-  '- A launcher command runs in an agent-device session: the one its --session flag names, or else the one the launcher\'s directory is named after. The description says which sessions have started and whether an app is open in them. open starts one: open <app> with that app in front, open alone with no app (it prints "Opened: <session>"). close ends it. Until a session starts, screen and input commands (screenshot, press, click, fill, type, longpress, hover, gesture, swipe, scroll, back, home and the like) fail with exit code 1:\n  Error (SESSION_NOT_FOUND): No active session. Run open first.\n  Hint: Run open first or pass an explicit device selector.\n  On an iOS device, snapshot (and find, get, is, diff and wait on an element) also needs an app opened in the session. Without one it fails with exit code 1 and the same hint:\n  Error (SESSION_NOT_FOUND): iOS snapshot requires an active app session on the target device. Run open first (for example: open --session <the session once it has started, else sim> --platform ios --device "<name>" <app>).\n  On Android, snapshot needs no session and starts one without an app. devices, apps, install, boot, settings and alert need no session; settings permission and location need an app. open --foreground fails with exit code 1 when the command passes --udid or --device, as T3\'s launchers do: "Error (INVALID_ARGS): open --foreground resolves the device itself; drop --udid/--device or open explicitly: agent-device open <app> --udid <udid>."',
+  '- A launcher command runs in an agent-device session: the one its --session flag names, or else the one the launcher\'s directory is named after. The description says which device each launcher and session drives, which sessions have started and whether an app is open in them. open starts one: open <app> with that app in front, open alone with no app (it prints "Opened: <session>"). close ends it. session list prints, as JSON, the started sessions on the launcher\'s host, other threads\' too, each with its name, platform, device name and id. Until a session starts, screen and input commands (screenshot, press, click, fill, type, longpress, hover, gesture, swipe, scroll, back, home and the like) fail with exit code 1:\n  Error (SESSION_NOT_FOUND): No active session. Run open first.\n  Hint: Run open first or pass an explicit device selector.\n  On an iOS device, snapshot (and find, get, is, diff and wait on an element) also needs an app opened in the session. Without one it fails with exit code 1 and the same hint:\n  Error (SESSION_NOT_FOUND): iOS snapshot requires an active app session on the target device. Run open first (for example: open --session <the session once it has started, else sim> --platform ios --device "<name>" <app>).\n  On Android, snapshot needs no session and starts one without an app. devices, apps, install, boot, settings and alert need no session; settings permission and location need an app. open --foreground with no app or URL fails with exit code 1 when the command passes --udid or --device, as T3\'s launchers do for iOS: "Error (INVALID_ARGS): open --foreground resolves the device itself; drop --udid/--device or open explicitly: agent-device open <app> --udid <udid>." open <app> --foreground works.',
   '- record start without --scope device records the app open in the session. Before the session starts it fails with "Error (INVALID_ARGS): record start with app scope and an explicit session requires an active app session; run open <app> first, or use --scope device to record the full screen" and the hint above. In a session open with no app it fails with "Error (UNKNOWN): App-scoped recording requires an active app session; open the app under test before recording." and "Hint: Unexpected internal error. Retry with --debug and report the diagnostics log if it persists." --scope device records the whole screen and needs no session.',
   "- Otherwise a command in this help acts on the launcher's device and succeeds unless the description says otherwise.",
   "",
@@ -301,13 +309,19 @@ const launcherAliases = (command: string, targets: ReadonlyArray<LauncherTarget>
     ([, name = "", , value = ""]) =>
       targets.some((target) => target.command === value) ? [[name, value] as const] : [],
   );
+const withAliases = (command: string, aliases: ReadonlyArray<readonly [string, string]>) =>
+  aliases.reduce(
+    (text, [name, value]) =>
+      text.replace(new RegExp(`"?\\$(?:\\{${name}\\}|${name}(?!\\w))"?`, "g"), value),
+    command,
+  );
 
-/** Each session the launchers name after these calls. Aliases may span calls, as in grading. */
-export const agentDeviceSessions = (
+/** The sessions and variables after these calls. Aliases may span calls, as in grading. */
+const followSessions = (
   targets: ReadonlyArray<LauncherTarget>,
   declared: DeviceWorld["agentDeviceSessions"],
   history: ReadonlyArray<ShellCall>,
-  owners: ReadonlyArray<AgentDeviceOwner> = [],
+  owners: ReadonlyArray<AgentDeviceOwner>,
 ) => {
   const sessions = new Map<string, AgentDeviceSession | undefined>();
   for (const target of targets) {
@@ -324,16 +338,7 @@ export const agentDeviceSessions = (
     if (typeof command !== "string") continue;
     const failed = FAILED.test(output);
     const aliases = failed ? [] : launcherAliases(command, targets);
-    const actions = shellInvocations(
-      aliases.reduce(
-        (text, [name, value]) =>
-          text.replace(new RegExp(`"?\\$(?:\\{${name}\\}|${name}(?!\\w))"?`, "g"), value),
-        command,
-      ),
-      variables,
-      false,
-      !failed,
-    );
+    const actions = shellInvocations(withAliases(command, aliases), variables, false, !failed);
     for (const [name, value] of aliases) variables.set(name, value);
     // A lone command's failure is its own. A compound call's output may not say which command
     // failed, so its certain launcher commands count, as the simulator likely ran them. A call that
@@ -348,28 +353,63 @@ export const agentDeviceSessions = (
         sessions.set(call.tracked, afterCall(call, sessions.get(call.tracked)));
     }
   }
-  return sessions;
+  return { sessions, variables };
 };
 
-/** What the shell simulator is told of the sessions the launchers name, and other threads'. */
+/** Each session the launchers name after these calls. */
+export const agentDeviceSessions = (
+  targets: ReadonlyArray<LauncherTarget>,
+  declared: DeviceWorld["agentDeviceSessions"],
+  history: ReadonlyArray<ShellCall>,
+  owners: ReadonlyArray<AgentDeviceOwner> = [],
+) => followSessions(targets, declared, history, owners).sessions;
+
+/**
+ * Each launcher `open` a new call makes, read as the tracker reads calls, with the other thread's
+ * session that holds its device. agent-device refuses an open that has one with DEVICE_IN_USE.
+ */
+const opensIn = (
+  targets: ReadonlyArray<LauncherTarget>,
+  { sessions, variables }: ReturnType<typeof followSessions>,
+  command: string,
+  owners: ReadonlyArray<AgentDeviceOwner>,
+) =>
+  shellInvocations(
+    withAliases(command, launcherAliases(command, targets)),
+    new Map(variables),
+    false,
+    true,
+  ).flatMap((action) => {
+    const call = action.remote ? undefined : launcherCall(targets, action.words);
+    return call?.command === "open" && call.tracked !== undefined
+      ? [{ call, words: action.words, owner: holder(call, call.tracked, sessions, owners) }]
+      : [];
+  });
+
+/**
+ * What the shell simulator is told of the sessions the launchers name, and other threads', with
+ * the device each drives where it is known.
+ */
 export const describeSessions = (
   sessions: ReadonlyMap<string, AgentDeviceSession | undefined>,
   owners: ReadonlyArray<AgentDeviceOwner> = [],
+  devices: ReadonlyMap<string, string> = new Map(),
 ) =>
   [...sessions]
     .map(([name, session]) => {
+      const named = devices.has(name) ? `${name} (${devices.get(name)})` : name;
       const owner = owners.find((candidate) => candidate.session === name);
       if (owner !== undefined)
         return session === undefined
-          ? `${name} belonged to another T3 thread (${owner.threadId}) and was closed, which freed device ${owner.deviceId}`
-          : `${name} belongs to another T3 thread (${owner.threadId}): it holds device ${owner.deviceId} with an app open. An open in any other session on that device fails with exit code 1, printing "Error (DEVICE_IN_USE): Device is already in use by session "${name}"." and "Hint: ${inUseHint(name)}"`;
+          ? `${named} belonged to another T3 thread (${owner.threadId}) and was closed, which freed its device`
+          : `${named} belongs to another T3 thread (${owner.threadId}) and holds its device with an app open`;
       return session === undefined
-        ? `${name} has not started`
+        ? `${named} has not started`
         : session.recordingOnly
-          ? `${name} holds only a --scope device recording`
+          ? `${named} holds only a --scope device recording`
           : session.app
-            ? `${name} is open with an app`
-            : `${name} is open with no app`;
+            ? `${named} is open with an app`
+            : `${named} is open with no app`;
     })
     .join("; ");
 
@@ -404,6 +444,17 @@ const inUseHint = (owner: string, waitedMs?: number) =>
       ? ["To wait for the device to free up, run the same open with --wait <ms>."]
       : []),
   ].join(" ");
+/** agent-device's refusal of an open on a device another session holds, unless --wait is bad. */
+const inUseError = (call: LauncherCall, owner: AgentDeviceOwner) => {
+  const wait = call.flags.get("--wait");
+  return wait === undefined || /^\d+$/.test(wait)
+    ? {
+        code: "DEVICE_IN_USE",
+        message: `Device is already in use by session "${owner.session}".`,
+        hint: inUseHint(owner.session, wait === undefined ? undefined : Number(wait)),
+      }
+    : undefined;
+};
 
 /**
  * agent-device 0.21.31's error for a plain launcher command that needs its session before
@@ -445,14 +496,8 @@ export const agentDeviceSessionError = (
     return undefined;
   }
   const owner = holder(call, call.session, sessions, owners);
-  const wait = call.flags.get("--wait");
-  if (owner !== undefined && (wait === undefined || /^\d+$/.test(wait)))
-    return {
-      session: call.session,
-      code: "DEVICE_IN_USE",
-      message: `Device is already in use by session "${owner.session}".`,
-      hint: inUseHint(owner.session, wait === undefined ? undefined : Number(wait)),
-    };
+  const inUse = owner && inUseError(call, owner);
+  if (inUse !== undefined) return { session: call.session, ...inUse };
   if (call.command === "snapshot" && call.target.ios && !session?.app)
     return {
       session: call.session,
@@ -813,6 +858,63 @@ export const makeDeviceTools = Effect.fn("evaluateMcpToolUse.makeDeviceTools")(f
   });
   const sessions = (history: ReadonlyArray<ShellCall>) =>
     agentDeviceSessions(targets, world.agentDeviceSessions, history, owners);
+  /** A device as the simulator knows it from the world: its name, id and host. */
+  const deviceName = (deviceId: string) => {
+    const device = world.devices.find((candidate) => candidate.id === deviceId);
+    if (device === undefined) return deviceId;
+    const host =
+      device.hostId === LOCAL_DEVICE_HOST_ID
+        ? LOCAL_DEVICE_HOST_LABEL
+        : (world.deviceHosts?.[device.hostId] ?? device.hostId);
+    return `${device.name}, ${device.id}, on ${host}`;
+  };
+  const launcherText = (command: string) => {
+    const target = targets.findLast((candidate) => candidate.command === command);
+    if (target === undefined) return command;
+    return target.bound
+      ? `${command} (drives ${deviceName(target.deviceId)}, in session ${target.session})`
+      : `${command} (shared: each command's --udid or --serial and --session name its device and session)`;
+  };
+  const describe = (history: ReadonlyArray<ShellCall>, command: string | undefined) => {
+    const followed = followSessions(targets, world.agentDeviceSessions, history, owners);
+    const sessionDevices = new Map([
+      ...targets.map((target) => [target.session, deviceName(target.deviceId)] as const),
+      ...owners.map((owner) => [owner.session, deviceName(owner.deviceId)] as const),
+    ]);
+    // Code, not the simulator, decides which of the call's opens another thread's session refuses.
+    const opens =
+      command === undefined || owners.length === 0
+        ? []
+        : opensIn(targets, followed, command, owners).flatMap(({ call, words, owner }) => {
+            const opened = `\`${words.join(" ")}\` drives ${deviceName(call.deviceId)}`;
+            const error = owner && inUseError(call, owner);
+            if (owner !== undefined && error !== undefined)
+              return [
+                `${opened}, which session ${owner.session} holds: it fails with exit code 1, printing "Error (${error.code}): ${error.message}" and "Hint: ${error.hint}"`,
+              ];
+            const held = owners.some(
+              (candidate) =>
+                candidate.deviceId === call.deviceId &&
+                followed.sessions.get(candidate.session) !== undefined,
+            );
+            return held
+              ? []
+              : [`${opened}, which no other session holds: it prints no DEVICE_IN_USE`];
+          });
+    return [
+      ...(launchers.length > 0
+        ? [
+            `agent-device launchers T3's device_open returned: ${[...new Set(launchers)].map(launcherText).join("; ")}`,
+          ]
+        : []),
+      ...(followed.sessions.size > 0
+        ? [
+            `Their agent-device sessions: ${describeSessions(followed.sessions, owners, sessionDevices)}.`,
+          ]
+        : []),
+      ...(opens.length > 0 ? [`In the new call, ${[...new Set(opens)].join("; ")}.`] : []),
+    ];
+  };
   return {
     call,
     launchers,
@@ -822,6 +924,7 @@ export const makeDeviceTools = Effect.fn("evaluateMcpToolUse.makeDeviceTools")(f
       const error = agentDeviceSessionError(targets, sessions(history), command, owners);
       return error && agentDeviceError(home, error.session, `${history.length}\n${command}`, error);
     },
+    describe,
   } satisfies DeviceTools;
 });
 

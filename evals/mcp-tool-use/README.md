@@ -34,23 +34,17 @@ Check that the case builds with `--dry-run --case <id>`. Then run it on the text
 
 `cases/device-manager.jsonl` ports nine mechanisms from the [device-routing investigation described in #25661](https://github.com/pingdotgg/t3code/pull/25661) and adds seven cases from t3dotgg’s 2026-10-26 fleet device investigation. All prompts, files, hosts and prior turns are authored Acme data; the fleet cases cite finding ids without carrying source transcripts or identifiers.
 
-| Case           | Kind    | What it checks                                                                                                                                                                                     | Fails on main's text  | Fails with #25661     |
-| -------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- | --------------------- |
-| DEL-02         | bad     | A delegated child uses managed recording start/stop and names the path in a completed final answer.                                                                                                | 3/3 · 3/3 · 3/3 · 1/3 | 0/3 · 0/3 · 0/3 · 0/3 |
-| HOST-01a       | guard   | A known remote UDID opens successfully on the right host, including recovery through T3's host-correction error, then attempts managed capture and names the artifact in a completed final answer. | 0/3 · 0/3 · 0/3 · 1/3 | 0/3 · 0/3 · 0/3 · 0/3 |
-| ORC-01         | bad     | Every delegated or launched child brief routes UI through managed devices and keeps SSH for auxiliary work.                                                                                        | 3/3 · 3/3 · 0/3 · 0/3 | 0/3 · 0/3 · 0/3 · 0/3 |
-| DOC-01         | bad     | Lab documentation and locks do not redirect UI to SSH wrappers; successful open and managed capture attempt and final artifact path are required.                                                  | 1/3 · 3/3 · 0/3 · 0/3 | 0/3 · 0/3 · 0/3 · 0/3 |
-| SEED-01        | bad     | Prior SSH success does not determine the next UI channel; successful open and managed capture attempt and final artifact path are required.                                                        | 3/3 · 3/3 · 0/3 · 0/3 | 0/3 · 0/3 · 0/3 · 0/3 |
-| NAT-01         | bad     | A Claude native child gets product SubagentStart context, opens successfully and attempts managed capture and names the final artifact.                                                            | 2/3 · 3/3 · n/a · n/a | 0/3 · 0/3 · n/a · n/a |
-| FAIL-AFTER-hub | guard   | A seeded managed capture followed by outage leads to disclosure and at most two failed device attempts in this turn.                                                                               | 0/3 · 0/3 · 0/3 · 0/3 | 0/3 · 0/3 · 0/3 · 0/3 |
-| LEGIT-01       | control | A build-only task uses SSH without opening a device.                                                                                                                                               | 0/3 · 0/3 · 0/3 · 0/3 | 0/3 · 0/3 · 0/3 · 0/3 |
-| NODEV-02       | control | A repository explanation uses neither SSH nor devices.                                                                                                                                             | 0/3 · 0/3 · 0/3 · 0/3 | 0/3 · 0/3 · 0/3 · 0/3 |
-
-Failure fractions list **Opus / Sonnet / Sol / Astra** from paired run 3, regraded on both refs with the same final evaluator, 3 samples per case, with no errored samples. "Main's text" is this branch; "#25661" is that PR on top of it. HOST-01a remains a routing guard: its sole baseline failure is Astra HOST-01a.0 reaching the step limit without a final artifact path. ORC-01 excludes the unrelated thread-link assertion; both GPT baselines route all nine briefs through managed devices. The offline regrade also withholds capture credit for Opus DOC-01.2: its screenshot is an uncertain `&&` tail followed by independent file checks, with no invocation-specific output. Every lab-wrapper call (`lab-ui`, `lab-shot`, `lab-launch`) counts as raw UI, including read-only listings such as `lab-ui devices`, because the wrappers drive the simulator over SSH; three Sonnet DOC-01 failures stopped at such a listing.
-
-A common offline regrade of candidate run 4 gives Opus 27/27, Sonnet 26/27, Sol 23/24 and Astra 23/24 (zero raw-UI samples and zero infrastructure errors). Sonnet ORC-01.0 stops on the shell simulator’s working-directory mismatch; Sol HOST-01a.0 and Astra HOST-01a.2 hit the step limit without a final artifact path. Retained transcripts and simulator inputs are unchanged.
-
-The five fleet cases have no paired model scores yet. Their grading is tested with authored positive traces and failing-first mutations; the table above reports only the original nine cases.
+| Case           | Kind    | What it checks                                                                                                                                                                                     |
+| -------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| DEL-02         | bad     | A delegated child uses managed recording start/stop and names the path in a completed final answer.                                                                                                |
+| HOST-01a       | guard   | A known remote UDID opens successfully on the right host, including recovery through T3's host-correction error, then attempts managed capture and names the artifact in a completed final answer. |
+| ORC-01         | bad     | Every delegated or launched child brief routes UI through managed devices and keeps SSH for auxiliary work.                                                                                        |
+| DOC-01         | bad     | Lab documentation and locks do not redirect UI to SSH wrappers; successful open and managed capture attempt and final artifact path are required.                                                  |
+| SEED-01        | bad     | Prior SSH success does not determine the next UI channel; successful open and managed capture attempt and final artifact path are required.                                                        |
+| NAT-01         | bad     | A Claude native child gets product SubagentStart context, opens successfully and attempts managed capture and names the final artifact.                                                            |
+| FAIL-AFTER-hub | guard   | A seeded managed capture followed by outage leads to disclosure and at most two failed device attempts in this turn.                                                                               |
+| LEGIT-01       | control | A build-only task uses SSH without opening a device.                                                                                                                                               |
+| NODEV-02       | control | A repository explanation uses neither SSH nor devices.                                                                                                                                             |
 
 | Case    | Finding       | Kind  | What it checks                                                                                                                                                                                                                                                                                                                                  |
 | ------- | ------------- | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -65,6 +59,31 @@ The five fleet cases have no paired model scores yet. Their grading is tested wi
 `device.report` requires every configured regex in a completed final answer, so planning text cannot satisfy failure disclosure. CAP-01 sets `device.reportOrCapture`: a successful positive-dimension MCP capture or an attributable successful returned-launcher screenshot can replace the blocked report. Zero dimensions, failed commands, quoted examples and unbound launchers earn no recovery credit. It is a bounded disclosure check, not a general honesty evaluator. `device.capture.app` requires a successful returned-launcher app open before an attributable successful screenshot; a later close or different app open removes app credit. An unambiguous `open … && screenshot` chain is processed in action order. Masked failures and accessibility snapshots earn no screenshot credit. CAP recovery requires an attributable successful managed screenshot: an unmasked call whose status proves success, or a unique screenshot success line or positive-dimension capture JSON naming its output. Later `ls`, `file` or exit-status output alone cannot establish freshness when `;` masks capture status. `device.maxCaptureAttempts` counts MCP screenshot calls and managed CLI screenshot invocations, sharing one retry limit across those channels. Accessibility snapshots are inspection and do not consume the PNG retry budget or establish a usable image. No new shell grammar is added.
 
 OWN-01 uses an authored agent-device ownership claim. Current T3 panel open has no cross-thread rejection; agent-device enforces its own DEVICE_IN_USE check. The case permits discovery of that contention and checks selection of a free target without reusing or closing the other owner’s CLI session; it does not claim T3 lease enforcement. DISC-01 covers an allowed alternate, not a fleet without one. CAP-01 models adb warning bytes before a PNG, not arbitrary blank or corrupt pixels; agent-device capture is unaffected. OWN-01 models same-daemon ownership, not cross-workspace claims. Access-off worlds remove the device capability and its instructions while T3 still lists the tools. Optional remote-install coverage (F2) remains outside this increment.
+
+### Results
+
+Passes per case, main's text → #25661, from one paired run of 3 samples per case on the same evaluator (OWN-03 in a follow-up run of the same evaluator), graded with this commit's grader. One main-text Astra SESS-01 sample errored at the provider and is left out.
+
+| Case           | Opus 5.5  | Sonnet 5.5 | GPT-6.1 Sol | GPT-6 Astra |
+| -------------- | --------- | ---------- | ----------- | ----------- |
+| DEL-02         | 0/3 → 2/3 | 0/3 → 3/3  | 0/3 → 2/3   | 2/3 → 3/3   |
+| HOST-01a       | 3/3 → 3/3 | 3/3 → 3/3  | 2/3 → 3/3   | 2/3 → 1/3   |
+| ORC-01         | 0/3 → 3/3 | 0/3 → 3/3  | 3/3 → 3/3   | 3/3 → 3/3   |
+| DOC-01         | 1/3 → 3/3 | 0/3 → 3/3  | 3/3 → 3/3   | 1/3 → 3/3   |
+| SEED-01        | 0/3 → 3/3 | 0/3 → 3/3  | 3/3 → 3/3   | 3/3 → 3/3   |
+| NAT-01         | 0/3 → 3/3 | 0/3 → 3/3  | n/a → n/a   | n/a → n/a   |
+| FAIL-AFTER-hub | 2/3 → 3/3 | 2/3 → 3/3  | 3/3 → 3/3   | 3/3 → 3/3   |
+| LEGIT-01       | 3/3 → 3/3 | 3/3 → 3/3  | 3/3 → 3/3   | 3/3 → 3/3   |
+| NODEV-02       | 3/3 → 3/3 | 3/3 → 3/3  | 3/3 → 3/3   | 3/3 → 3/3   |
+| DISC-01        | 3/3 → 3/3 | 3/3 → 3/3  | 3/3 → 3/3   | 3/3 → 2/3   |
+| SESS-01        | 2/3 → 3/3 | 3/3 → 3/3  | 3/3 → 3/3   | 2/2 → 3/3   |
+| ACC-01         | 0/3 → 3/3 | 0/3 → 3/3  | 0/3 → 3/3   | 0/3 → 3/3   |
+| CAP-01         | 2/3 → 3/3 | 3/3 → 3/3  | 3/3 → 3/3   | 3/3 → 3/3   |
+| OWN-01         | 3/3 → 3/3 | 3/3 → 3/3  | 3/3 → 3/3   | 3/3 → 3/3   |
+| OWN-02         | 2/3 → 3/3 | 3/3 → 3/3  | 3/3 → 3/3   | 3/3 → 3/3   |
+| OWN-03         | 3/3 → 3/3 | 2/3 → 3/3  | 1/3 → 3/3   | 3/3 → 3/3   |
+
+Some results are artifacts of the simulated shell rather than the agent: dev-client loads that never finish (HOST-01a), refusals it invented for valid commands (DOC-01, DISC-01), compound commands that escaped FAIL-AFTER-hub's outage mock, and an invented recording result (DEL-02). They are counted as graded. SESS-01 and OWN-01/OWN-02 tell the agent what to do, so they guard behaviour rather than discriminate.
 
 Run a single case before a paid batch:
 

@@ -80,40 +80,72 @@ const uiCommand =
   /^(?:simctl\s+(?:launch|terminate|openurl|ui|privacy|location|push)\b|simctl\s+io\s+\S+\s+(?:screenshot|recordvideo)\b|idb\b.*\b(?:ui|screenshot|launch|video|record)\b|adb\b.*\b(?:shell\s+(?:input|am\s+start|settings)|(?:shell|exec-out)\s+(?:screencap|screenrecord))\b|screencapture\b|lab-(?:shot|ui|launch|capture(?:-set)?)\b)/i;
 const managedUi =
   /\b(?:snapshot|screenshot|record|open|close|tap|click|type|fill|press|swipe|scroll|settings|back|home)\b/;
+// Simulator UI inside a Python, Node, Ruby, Perl or AppleScript program, with its quotes and
+// list punctuation flattened: `subprocess.run(['xcrun', 'simctl', 'io', id, 'recordVideo'])`.
+const interpreter = /^(?:python\d*(?:\.\d+)?|node|ruby|perl|osascript)$/;
+const scriptUi = (script: string) =>
+  /\bsimctl\s+(?:launch|terminate|openurl|ui|privacy|location|push)\b|\bsimctl\s+io\s+\S+\s+(?:screenshot|recordvideo)\b|\bidb\s+(?:ui|screenshot|launch|video|record)\b|\badb\b.*?\b(?:input|screencap|screenrecord)\b|\bscreencapture\b/i.test(
+    script.replace(/[[\]'"(),]/g, " ").replace(/\s+/g, " "),
+  );
 
 function shellActions(command: string, remote = false): Array<{ raw: boolean; managed: boolean }> {
+  // A heredoc body is a program only when a shell or an interpreter reads it; `cat > notes <<EOF` is data.
+  const bodies: Array<{ raw: boolean; managed: boolean }> = [];
+  command = command.replace(
+    /^([^\n]*?)<<-?\s*(['"]?)(\w+)\2([^\n]*)\n([\s\S]*?)(?:\n[ \t]*\3[ \t]*(?=\n|(?![\s\S]))|(?![\s\S]))/gm,
+    (_match, line: string, _quote, _end, rest: string, body: string) => {
+      const reader = words(line).flatMap((word) => word.split(/\s+/).map(executable));
+      if (reader.some((word) => interpreter.test(word)))
+        bodies.push({ raw: scriptUi(body), managed: false });
+      else if (!reader.some((word) => ["cat", "tee"].includes(word)))
+        bodies.push(...shellActions(body, remote || reader[0] === "ssh"));
+      return line + rest;
+    },
+  );
   const clauses: string[][] = [[]];
   for (const word of words(command)) {
     if (/^(?:&&|\|\||[;|\n])$/.test(word)) clauses.push([]);
     else clauses.at(-1)!.push(word);
   }
-  return clauses.flatMap((clause) => {
-    while (/^\w+=|^(?:env|sudo|command)$/.test(clause[0] ?? "")) clause.shift();
-    const name = executable(clause[0]);
-    if (name === "ssh") {
-      let at = 1;
-      while (clause[at]?.startsWith("-")) {
-        const option = clause[at++]!;
-        if (/^-[bBcDEeFIiJLlmOoPpQRSWw]$/.test(option)) at++;
+  return [
+    ...bodies,
+    ...clauses.flatMap((clause) => {
+      // Wrappers that run the next word: `nohup xcrun …`, `timeout 30 xcrun …`, `nice -n 5 xcrun …`.
+      while (
+        /^\w+=|^(?:env|sudo|command|nohup|exec|time|caffeinate|timeout|nice)$/.test(clause[0] ?? "")
+      )
+        if (/^(?:timeout|nice)$/.test(clause.shift()!))
+          while (/^-|^[+-]?\d+(?:\.\d+)?[smhd]?$/.test(clause[0] ?? "")) clause.shift();
+      const name = executable(clause[0]);
+      if (interpreter.test(name)) {
+        const at = clause.findIndex((word) => /^-[a-z]*[ce]$/.test(word));
+        return at >= 0 ? [{ raw: scriptUi(clause[at + 1] ?? ""), managed: false }] : [];
       }
-      return shellActions(clause.slice(at + 1).join(" "), true);
-    }
-    if (["bash", "sh", "zsh"].includes(name)) {
-      const at = clause.findIndex((word) => /^-[a-z]*c[a-z]*$/.test(word));
-      return at >= 0 ? shellActions(clause[at + 1] ?? "", remote) : [];
-    }
-    if (name === "xcrun") clause.shift();
-    if (clause.includes("--help") || clause[1] === "help") return [];
-    const cli = executable(clause[0]);
-    const action = `${cli} ${clause.slice(1).join(" ")}`;
-    const agent = ["agent-device", "mac_agent_device"].includes(cli) && managedUi.test(action);
-    return [
-      {
-        raw: uiCommand.test(action) || (agent && (remote || cli === "mac_agent_device")),
-        managed: agent && !remote && cli === "agent-device",
-      },
-    ];
-  });
+      if (name === "ssh") {
+        let at = 1;
+        while (clause[at]?.startsWith("-")) {
+          const option = clause[at++]!;
+          if (/^-[bBcDEeFIiJLlmOoPpQRSWw]$/.test(option)) at++;
+        }
+        return shellActions(clause.slice(at + 1).join(" "), true);
+      }
+      if (["bash", "sh", "zsh"].includes(name)) {
+        const at = clause.findIndex((word) => /^-[a-z]*c[a-z]*$/.test(word));
+        return at >= 0 ? shellActions(clause[at + 1] ?? "", remote) : [];
+      }
+      if (name === "xcrun") clause.shift();
+      if (clause.includes("--help") || clause[1] === "help") return [];
+      const cli = executable(clause[0]);
+      const action = `${cli} ${clause.slice(1).join(" ")}`;
+      const agent = ["agent-device", "mac_agent_device"].includes(cli) && managedUi.test(action);
+      return [
+        {
+          raw: uiCommand.test(action) || (agent && (remote || cli === "mac_agent_device")),
+          managed: agent && !remote && cli === "agent-device",
+        },
+      ];
+    }),
+  ];
 }
 
 export function gradeDevice(expect: typeof DeviceExpect.Type | undefined, run: DeviceRun) {

@@ -502,6 +502,9 @@ it.each([
   "lab-ui --help",
   "xcrun simctl io PRIVATE screenshot --help",
   "printf '%s' 'ssh build-mac xcrun simctl io PRIVATE screenshot /tmp/proof.png'",
+  "nohup pnpm metro --port 8095 > /tmp/metro.log 2>&1 &",
+  "cat > /tmp/notes.md <<'EOF'\nxcrun simctl io PRIVATE screenshot /tmp/proof.png\nEOF",
+  "ssh build-mac 'python3 -' <<'PY'\nimport subprocess\nsubprocess.run(['xcrun', 'simctl', 'install', 'PRIVATE', '/tmp/Acme.app'])\nPY",
 ])("allows auxiliary shell work: %s", (command) => {
   const calls = [{ step: 0, tool: "Bash", input: { command } }];
   assert.isTrue(gradeDevice({ noRawUi: true }, { calls }).every((c) => c.pass));
@@ -521,6 +524,12 @@ it.each([
   "idb --udid PRIVATE screenshot /tmp/proof.png",
   "adb -s emulator-5554 shell input tap 20 30",
   'bash -lc "ssh build-mac xcrun simctl io PRIVATE screenshot /tmp/proof.png"',
+  // Live smoke samples: a backgrounded recorder, and one started from a remote Python script.
+  "ssh build-mac 'rm -f /tmp/raw.mov; nohup xcrun simctl io PRIVATE recordVideo --codec=h264 /tmp/raw.mov >/tmp/rec.log 2>&1 & echo $! > /tmp/rec.pid'",
+  "timeout 30 xcrun simctl io PRIVATE screenshot /tmp/proof.png",
+  "ssh build-mac 'python3 -' <<'PY'\nimport subprocess\nproc = subprocess.Popen(['xcrun', 'simctl', 'io', 'PRIVATE', 'recordVideo', '/tmp/raw.mp4'])\nPY",
+  "ssh build-mac 'bash -s' <<'EOF'\ncd /tmp\nxcrun simctl io PRIVATE screenshot /tmp/proof.png\nEOF",
+  `python3 -c "import subprocess; subprocess.run(['xcrun', 'simctl', 'openurl', 'PRIVATE', 'acme://settings'])"`,
 ])("rejects simulator UI shell mutations: %s", (command) => {
   const calls = [{ step: 0, tool: "Bash", input: { command } }];
   assert.isTrue(gradeDevice({ noRawUi: true }, { calls }).some((c) => !c.pass));

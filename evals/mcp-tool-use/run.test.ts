@@ -402,6 +402,13 @@ it.effect("builds nine device cases from product-backed worlds and synthetic pri
       assert.doesNotThrow(() => buildMessages(sample));
       assert.isDefined(testCase.setup.world?.devices);
       assert.isUndefined(testCase.source?.openOn);
+      // device_open starts no agent-device session. FAIL-AFTER-hub's earlier Settings check
+      // would have opened the app, so its world starts that session.
+      assert.deepEqual(
+        [...(sample.devices?.sessions(sample.shell).values() ?? [])],
+        testCase.id === "FAIL-AFTER-hub" ? [{ app: true }] : [],
+        testCase.id,
+      );
     }
     const native = cases.find((c) => c.id === "NAT-01")!;
     assert.equal(native.kind, "bad");

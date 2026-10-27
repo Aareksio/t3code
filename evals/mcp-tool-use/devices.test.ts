@@ -6,10 +6,20 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
-import { AGENT_DEVICE_SHELL, deviceFailure, launcherHelp, makeDeviceTools } from "./devices.ts";
+import {
+  AGENT_DEVICE_SHELL,
+  agentDeviceSessionError,
+  agentDeviceSessions,
+  deviceFailure,
+  type LauncherTarget,
+  launcherHelp,
+  makeDeviceTools,
+  type ShellCall,
+} from "./devices.ts";
 import {
   buildBase,
   buildMessages,
+  cannedOutput,
   makeSample,
   McpToolUseCase,
   shellRequest,
@@ -227,3 +237,274 @@ it("pins agent-device's help to the version T3 installs", () => {
   );
   assert.include(AGENT_DEVICE_SHELL, `agent-device ${versions["agent-device"]} prints this help`);
 });
+
+// agent-device 0.21.31's errors as a real Mac printed them (stderr, exit status 1).
+const NO_SESSION =
+  "Error (SESSION_NOT_FOUND): No active session. Run open first.\nHint: Run open first or pass an explicit device selector.";
+const APP_RECORDING_BEFORE_OPEN =
+  "Error (INVALID_ARGS): record start with app scope and an explicit session requires an active app session; run open <app> first, or use --scope device to record the full screen\nHint: Check command arguments and run --help for usage examples.";
+const APP_RECORDING_WITHOUT_APP =
+  "Error (UNKNOWN): App-scoped recording requires an active app session; open the app under test before recording.\nHint: Unexpected internal error. Retry with --debug and report the diagnostics log if it persists.";
+
+it.effect("answers the returned launcher as agent-device does before and after open", () =>
+  Effect.gen(function* () {
+    const { devices = [], deviceHosts } = deviceCase({}).setup.world ?? {};
+    const tools = yield* makeDeviceTools({ devices, deviceHosts }, base.environment);
+    const opened = json((yield* tools.call("device_open", { hostId: MAC, deviceId: IPHONE })).text);
+    const { command, targetArgs, session: bound } = opened.agentDevice;
+    // This ref's launcher: a bound one names its session; the shared one takes device_open's flags.
+    const session: string = bound ?? targetArgs[targetArgs.indexOf("--session") + 1];
+    const line = (args: string) =>
+      bound === undefined ? `${command} ${args} ${targetArgs.join(" ")}` : `${command} ${args}`;
+    const history: Array<ShellCall> = [];
+    const answer = (args: string) => tools.sessionError(history, line(args));
+    const ran = (args: string, output: string) =>
+      history.push({ tool: "Bash", input: { command: line(args) }, output });
+
+    const shot = answer("screenshot /tmp/shot.png") ?? "";
+    assert.isTrue(shot.startsWith(`Exit code 1\n${NO_SESSION}\nDiagnostic ID: `));
+    assert.match(
+      shot,
+      new RegExp(
+        `\\nDiagnostics Log: /home/user/\\.agent-device/remote-diagnostics/${session}/requests/[\\da-f]{16}\\.ndjson$`,
+      ),
+    );
+    for (const args of ["press @e3 --settle", 'fill @e5 "hello world"', "scroll down", "home"]) {
+      assert.include(answer(args), NO_SESSION, args);
+    }
+    assert.include(answer("record start /tmp/run.mp4"), APP_RECORDING_BEFORE_OPEN);
+    // With the device selector both refs pass, these run without a session.
+    for (const args of [
+      "open",
+      "devices",
+      "apps",
+      "snapshot -i",
+      "settings appearance dark",
+      "alert accept",
+      "install com.acme.app /tmp/Acme.app",
+      "record start --scope device /tmp/run.mp4",
+    ]) {
+      assert.isUndefined(answer(args), args);
+    }
+    // Unknown flags, JSON output and compound commands stay with the simulator.
+    assert.isUndefined(answer("screenshot --bogus /tmp/shot.png"));
+    assert.isUndefined(answer("screenshot --json /tmp/shot.png"));
+    assert.isUndefined(tools.sessionError(history, `${line("screenshot /tmp/a.png")} && echo ok`));
+    assert.deepEqual([...tools.sessions(history)], [[session, undefined]]);
+
+    ran("open com.acme.missing", "Exit code 1\nError (APP_NOT_INSTALLED): App not installed");
+    assert.include(answer("screenshot /tmp/shot.png"), NO_SESSION);
+    ran("open", `Opened: ${session}`);
+    assert.isUndefined(answer("screenshot /tmp/shot.png"));
+    assert.isUndefined(answer("press @e3"));
+    assert.include(answer("record start /tmp/run.mp4"), APP_RECORDING_WITHOUT_APP);
+    assert.isUndefined(answer("record start --scope device /tmp/run.mp4"));
+    ran("open com.acme.app", "Opened: com.acme.app");
+    assert.isUndefined(answer("record start /tmp/run.mp4"));
+    assert.deepEqual([...tools.sessions(history)], [[session, { app: true }]]);
+    ran("close", "Closed");
+    assert.include(
+      tools.sessionError(history, `${line("screenshot /tmp/a.png")} 2>&1`),
+      NO_SESSION,
+    );
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+const shared = (session: string): LauncherTarget => ({
+  command: "/home/user/.t3/userdata/device/bin/agent-device",
+  session,
+  bound: false,
+  deviceId: IPHONE,
+  iosSimulator: true,
+});
+const boundTarget: LauncherTarget = {
+  command: "/home/user/.t3/userdata/device/targets/t3-bound/agent-device",
+  session: "t3-bound",
+  bound: true,
+  deviceId: IPHONE,
+  iosSimulator: true,
+};
+const bash = (command: string, output = "OK"): ShellCall => ({
+  tool: "Bash",
+  input: { command },
+  output,
+});
+const errorCode = (
+  targets: ReadonlyArray<LauncherTarget>,
+  history: ReadonlyArray<ShellCall>,
+  command: string,
+) => agentDeviceSessionError(targets, agentDeviceSessions(targets, {}, history), command)?.code;
+
+it("names the session on either ref: the bound launcher's own, or the shared one's --session", () => {
+  const flags = `--platform ios --udid ${IPHONE} --config /home/user/.t3/userdata/device/hosts/x.json`;
+  const sharedTargets = [shared("t3-a"), shared("t3-b")];
+  // The shared launcher answers each session its flags name; without one, its own check (not
+  // modelled) refuses before agent-device runs.
+  const opened = [bash(`${sharedTargets[0]!.command} open com.acme.app ${flags} --session t3-a`)];
+  assert.isUndefined(
+    errorCode(
+      sharedTargets,
+      opened,
+      `${sharedTargets[0]!.command} screenshot ${flags} --session t3-a`,
+    ),
+  );
+  assert.equal(
+    errorCode(
+      sharedTargets,
+      opened,
+      `${sharedTargets[0]!.command} screenshot ${flags} --session=t3-b`,
+    ),
+    "SESSION_NOT_FOUND",
+  );
+  assert.isUndefined(errorCode(sharedTargets, [], `${sharedTargets[0]!.command} screenshot`));
+  // The bound launcher needs no flags, and an explicit --session still wins.
+  assert.equal(
+    errorCode([boundTarget], [], `${boundTarget.command} screenshot`),
+    "SESSION_NOT_FOUND",
+  );
+  assert.equal(errorCode([boundTarget], [], `${boundTarget.command} record start`), "INVALID_ARGS");
+  const boundOpen = [bash(`${boundTarget.command} open`)];
+  assert.isUndefined(errorCode([boundTarget], boundOpen, `${boundTarget.command} screenshot`));
+  assert.equal(
+    errorCode([boundTarget], boundOpen, `${boundTarget.command} record start /tmp/r.mp4`),
+    "UNKNOWN",
+  );
+  assert.equal(
+    errorCode([boundTarget], boundOpen, `${boundTarget.command} screenshot --session other`),
+    "SESSION_NOT_FOUND",
+  );
+  // Without a selector, agent-device's record and close refuse a missing named session with
+  // other text; that stays with the simulator.
+  assert.isUndefined(
+    errorCode(sharedTargets, [], `${sharedTargets[0]!.command} record start --session t3-a`),
+  );
+});
+
+it("follows the session through aliases, compound calls, snapshots and whole-screen recordings", () => {
+  const launcher = boundTarget.command;
+  const after = (...history: ReadonlyArray<ShellCall>) =>
+    agentDeviceSessions([boundTarget], {}, history).get("t3-bound");
+  assert.deepEqual(after(bash(`AD=${launcher}; "$AD" open com.acme.app`)), { app: true });
+  // A failed lone open starts nothing; an open in a failed compound call still counts.
+  assert.isUndefined(after(bash(`${launcher} open com.acme.app`, "Exit code 1\nError (X): no")));
+  assert.deepEqual(
+    after(bash(`${launcher} open com.acme.app && ${launcher} press @e9`, "Exit code 1\nboom")),
+    { app: true },
+  );
+  // Dead tails, remote agent-device and help start nothing.
+  assert.isUndefined(after(bash(`false && ${launcher} open`, "Exit code 1")));
+  assert.isUndefined(after(bash("ssh build-mac agent-device open com.acme.app")));
+  assert.isUndefined(after(bash(`${launcher} help open`)));
+  // agent-device publishes a session for a sessionless snapshot, without an app.
+  assert.deepEqual(after(bash(`${launcher} snapshot -i`)), { app: false });
+  // A whole-screen recording holds a session only until it stops.
+  const recording = bash(`${launcher} record start --scope device /tmp/r.mp4`);
+  assert.deepEqual(after(recording), { app: false, recordingOnly: true });
+  assert.isUndefined(errorCode([boundTarget], [recording], `${launcher} screenshot`));
+  assert.isUndefined(after(recording, bash(`${launcher} record stop`)));
+  assert.equal(
+    errorCode(
+      [boundTarget],
+      [recording, bash(`${launcher} record stop`)],
+      `${launcher} screenshot`,
+    ),
+    "SESSION_NOT_FOUND",
+  );
+  assert.deepEqual(after(bash(`${launcher} open`), bash(`${launcher} close`)), undefined);
+});
+
+it("follows the shared launcher's session through flags held in a variable or an array", () => {
+  // Forms Sonnet used with the shared launcher in a live sample.
+  const target = shared("t3-a");
+  const flags = `--platform ios --udid ${IPHONE} --config /home/user/.t3/userdata/device/hosts/x.json --session t3-a`;
+  const after = (history: ShellCall, targets = [target]) =>
+    agentDeviceSessions(targets, {}, [history]).get("t3-a");
+  const opened = bash(
+    `AD=${target.command}; A="${flags}"; $AD open com.acme.app $A 2>&1 | tail -5; sleep 5; $AD snapshot -i $A 2>&1 | head -60`,
+    "Opened: com.acme.app",
+  );
+  assert.deepEqual(after(opened), { app: true });
+  const array = bash(`A=(${flags}); ${target.command} snapshot -i "\${A[@]}" 2>&1 | head -60`);
+  assert.deepEqual(after(array), { app: false });
+  // With two sessions behind the shared launcher, unread flags name neither.
+  assert.isUndefined(after(array, [target, shared("t3-b")]));
+  // agent-device still sees no session for a plain command after a failed open in a variable.
+  const failed = bash(
+    `AD=${target.command}; A="${flags}"; $AD open $A`,
+    "Exit code 1\nError (X): no",
+  );
+  assert.equal(
+    errorCode([target], [failed], `${target.command} screenshot ${flags}`),
+    "SESSION_NOT_FOUND",
+  );
+});
+
+it.effect("starts sessions the world says prior turns opened, and rejects unknown devices", () =>
+  Effect.gen(function* () {
+    const testCase = deviceCase({
+      world: { ...world, agentDeviceSessions: { [IPHONE]: { app: "com.acme.app" } } },
+      priorTurns: [
+        { role: "user", text: "Show me Settings on the iPhone on build-mac." },
+        {
+          role: "assistant",
+          toolCalls: [
+            { tool: "device_open", input: { hostId: MAC, deviceId: IPHONE }, result: "default" },
+          ],
+        },
+      ],
+    });
+    const sample = makeSample(testCase, base);
+    yield* withDevices(sample);
+    const tools = sample.devices!;
+    const [launcher = ""] = tools.launchers;
+    assert.deepEqual([...tools.sessions(sample.shell).values()], [{ app: true }]);
+    const call = { tool: "Bash", input: { command: "ls" } };
+    assert.include(
+      JSON.stringify(shellRequest(sample, call, "claude-haiku-5-5").messages),
+      "is open with an app",
+    );
+    assert.isUndefined(tools.sessionError(sample.shell, `${launcher} record start /tmp/r.mp4`));
+    const { devices = [], deviceHosts } = testCase.setup.world ?? {};
+    const unknown = { devices, deviceHosts, agentDeviceSessions: { "not-a-device": {} } };
+    const exit = yield* Effect.exit(makeDeviceTools(unknown, base.environment));
+    assert.isTrue(exit._tag === "Failure");
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "answers a shell mock first, then help, then the session error, before the simulator",
+  () =>
+    Effect.gen(function* () {
+      const sample = makeSample(deviceCase({}), base);
+      yield* withDevices(sample);
+      const opened = yield* sample.devices!.call("device_open", { hostId: MAC, deviceId: IPHONE });
+      const { command, targetArgs, session } = json(opened.text).agentDevice;
+      const flags = session === undefined ? ` ${targetArgs.join(" ")}` : "";
+      const told = () =>
+        JSON.stringify(
+          shellRequest(sample, { tool: "Bash", input: {} }, "claude-haiku-5-5").messages,
+        );
+      assert.include(told(), "has not started; no open or snapshot has run in it");
+      assert.include(cannedOutput(sample, `${command} screenshot /tmp/a.png${flags}`), NO_SESSION);
+      assert.match(cannedOutput(sample, `${command} help record`) ?? "", /^Usage:/);
+      assert.isUndefined(cannedOutput(sample, `${command} open com.acme.app${flags}`));
+      const outage = makeSample(
+        deviceCase({
+          shellMocks: [
+            { match: "\\bagent-device\\b", output: "Exit code 1\nError (COMMAND_FAILED): down" },
+          ],
+        }),
+        base,
+      );
+      yield* withDevices(outage);
+      yield* outage.devices!.call("device_open", { hostId: MAC, deviceId: IPHONE });
+      assert.include(cannedOutput(outage, `${command} screenshot /tmp/a.png${flags}`), "down");
+      sample.shell.push({
+        tool: "Bash",
+        input: { command: `${command} open com.acme.app${flags}` },
+        output: "Opened: com.acme.app",
+      });
+      assert.isUndefined(cannedOutput(sample, `${command} screenshot /tmp/a.png${flags}`));
+      assert.include(told(), "is open with an app");
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);

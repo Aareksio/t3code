@@ -4,6 +4,7 @@
  * DeviceService, whose hosts are fakes holding the world's devices, so every result and error the
  * agent sees is T3's. Launcher files go to a file system that keeps nothing.
  */
+import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import {
@@ -42,11 +43,32 @@ import { liveThreadsLayer } from "../../apps/server/src/mcp/McpToolAccess.testki
 import { DeviceToolkit } from "../../apps/server/src/mcp/toolkits/device/tools.ts";
 import * as ProjectService from "../../apps/server/src/project/ProjectService.ts";
 import { ServerSettingsService } from "../../apps/server/src/serverSettings.ts";
+import { shellInvocations } from "./device-grading.ts";
 
 export interface DeviceWorld {
   readonly devices: ReadonlyArray<DeviceSummary>;
   /** Labels of the SSH device hosts, by id. The local host always exists. */
   readonly deviceHosts?: Readonly<Record<string, string>> | undefined;
+  /**
+   * agent-device sessions that prior turns started, by device id, with the app `open` put in
+   * each. Otherwise a device's session starts at its launcher's first `open` in the sample.
+   */
+  readonly agentDeviceSessions?:
+    | Readonly<Record<string, { readonly app?: string | undefined }>>
+    | undefined;
+}
+
+/** A shell, file or web call and the output the agent saw. */
+export interface ShellCall {
+  readonly tool: string;
+  readonly input: unknown;
+  readonly output: string;
+}
+
+/** A started agent-device session: whether `open <app>` put an app in it, or only a recording holds it. */
+export interface AgentDeviceSession {
+  readonly app: boolean;
+  readonly recordingOnly?: boolean;
 }
 
 /** One sample's device tools, answered by T3. */
@@ -59,6 +81,12 @@ export interface DeviceTools {
   ) => Effect.Effect<{ readonly text: string; readonly isError: boolean }>;
   /** The `agent-device` commands `device_open` returned, in order. */
   readonly launchers: ReadonlyArray<string>;
+  /** Each session the launchers name after these calls, by name; undefined until it starts. */
+  readonly sessions: (
+    history: ReadonlyArray<ShellCall>,
+  ) => ReadonlyMap<string, AgentDeviceSession | undefined>;
+  /** agent-device's error for a plain launcher command that needs a session it has not started. */
+  readonly sessionError: (history: ReadonlyArray<ShellCall>, command: string) => string | undefined;
 }
 
 export const isDeviceTool = (name: string) => Object.hasOwn(DeviceToolkit.tools, name);
@@ -117,10 +145,227 @@ export const AGENT_DEVICE_SHELL = [
   'The description lists the agent-device launchers T3 Code\'s device_open returned. Each is a file on the agent\'s machine, not on SSH hosts. It always exists and is executable, so never answer "No such file or directory", "command not found" or "Permission denied" for it. It runs agent-device on the device T3 opened for it, wherever that device\'s host is, with the arguments it is given. Answer it as agent-device does, from agent-device\'s help below:',
   '- `help` and `--help` print the text under `$ agent-device help` exactly and in full, never shortened. `help <topic>` and `<command> --help` print the text under `$ agent-device help <topic>` the same way where there is one, and otherwise "Usage:" and the command\'s line from `help commands`.',
   '- Only the commands and flags in this help exist. Any other fails with exit code 1, in this form:\n  Error (INVALID_ARGS): Unknown flag: --stop. Did you mean --scope?\n  Hint: Check command arguments and run --help for usage examples.\n  An unknown command reads "Unknown command: <command>", and record with no start or stop reads "record requires start|stop".',
-  "- A command in this help acts on the launcher's device and succeeds unless the description says otherwise.",
+  "- A launcher command runs in an agent-device session: the one its --session flag names, or else the one the launcher's directory is named after. The description says which sessions have started. open starts a session, and so does snapshot; close ends it. Until then, screen and input commands (screenshot, press, click, fill, type, longpress, hover, gesture, swipe, scroll, back, home and the like) fail with exit code 1:\n  Error (SESSION_NOT_FOUND): No active session. Run open first.\n  Hint: Run open first or pass an explicit device selector.\n  devices, apps, install, boot, snapshot, settings, alert and wait need no session.",
+  '- record start without --scope device records the app open in the session. Before the session starts it fails with "Error (INVALID_ARGS): record start with app scope and an explicit session requires an active app session; run open <app> first, or use --scope device to record the full screen" and the hint above. In a session open with no app it fails with "Error (UNKNOWN): App-scoped recording requires an active app session; open the app under test before recording." and "Hint: Unexpected internal error. Retry with --debug and report the diagnostics log if it persists." --scope device records the whole screen and needs no session.',
+  "- Otherwise a command in this help acts on the launcher's device and succeeds unless the description says otherwise.",
   "",
   HELP,
 ].join("\n");
+
+const FLAGS = new Set(HELP.match(/--[a-z][a-z\d-]*/g));
+/** Flags agent-device's help shows taking a value, such as `--scope <app|device|system>`. */
+const VALUE_FLAGS = new Set(
+  [...HELP.matchAll(/(--[a-z][a-z\d-]*)(?: <| [a-z]+\|)/g)].map((match) => match[1]),
+);
+const SELECTOR_FLAGS = ["--platform", "--target", "--device", "--udid", "--serial"];
+/**
+ * Commands agent-device 0.21.31's daemon routes to its `generic` and `interaction` handlers, which
+ * look up the named session first and fail with SESSION_NOT_FOUND without it. `get` and `is`
+ * check their arguments first, so they stay with the simulator.
+ */
+const NEEDS_SESSION =
+  /^(?:action-button|app-switcher|back|focus|fold|hardware-button|home|orientation|screenshot|scroll|telephony|tv-remote|viewport|click|fill|gesture|hover|longpress|press|swipe|type)$/;
+/** A shell call failed, or agent-device printed its failure envelope. */
+const FAILED = /^(?:Exit code [1-9]|<tool_use_error>)|\bError \([A-Z_]+\):|"success"\s*:\s*false/;
+
+/** A launcher `device_open` returned, and the agent-device session its target flags name. */
+export interface LauncherTarget {
+  readonly command: string;
+  readonly session: string;
+  /** A bound launcher passes its session itself; the shared one gets it from each command. */
+  readonly bound: boolean;
+  readonly deviceId: string;
+  /** agent-device checks for an app before an app-scoped recording only on iOS Simulators. */
+  readonly iosSimulator: boolean;
+}
+
+/** One launcher command line: its agent-device command and arguments, and the session it names. */
+const launcherCall = (targets: ReadonlyArray<LauncherTarget>, words: ReadonlyArray<string>) => {
+  const mine = targets.filter((target) => target.command === words[0]);
+  if (mine.length === 0) return undefined;
+  const flags = new Map<string, string>();
+  const positionals: Array<string> = [];
+  // The shell splits an unquoted variable holding flags, such as `$AD open app $A`.
+  const args = words
+    .slice(1)
+    .flatMap((word) => (word.startsWith("-") && /\s/.test(word) ? word.trim().split(/\s+/) : word));
+  for (let i = 0; i < args.length; i++) {
+    const word = args[i]!;
+    if (word === "--") {
+      positionals.push(...args.slice(i + 1));
+      break;
+    }
+    const at = word.indexOf("=");
+    if (!word.startsWith("-")) positionals.push(word);
+    else if (at > 0) flags.set(word.slice(0, at), word.slice(at + 1));
+    else flags.set(word, VALUE_FLAGS.has(word) ? (args[++i] ?? "") : "");
+  }
+  const named = flags.get("--session");
+  const target = mine.findLast((candidate) => candidate.session === named) ?? mine.at(-1)!;
+  // Flags this parser cannot read, such as a bash array, most likely are device_open's flags for
+  // the only session the shared launcher has served.
+  const unread =
+    named === undefined && !target.bound && new Set(mine.map((t) => t.session)).size === 1;
+  const [command = "", ...rest] = positionals;
+  return {
+    target,
+    command,
+    args: rest,
+    flags,
+    // The session agent-device sees. The shared launcher refuses a command without --session
+    // itself; that is not modelled.
+    session: named ?? (target.bound ? target.session : undefined),
+    // The session the call most likely ran in, for following sessions through the history.
+    tracked: named ?? (target.bound || unread ? target.session : undefined),
+    selector: target.bound || unread || SELECTOR_FLAGS.some((flag) => flags.has(flag)),
+    appScope: (flags.get("--scope") ?? "app") === "app",
+  };
+};
+type LauncherCall = NonNullable<ReturnType<typeof launcherCall>>;
+
+/**
+ * A session after one successful command. agent-device 0.21.31 publishes the named session on
+ * `open`, on a `snapshot` with a device selector, and for a whole-screen recording, which
+ * `record stop` retires. `close` ends it.
+ */
+const afterCall = (call: LauncherCall, session: AgentDeviceSession | undefined) => {
+  switch (call.command) {
+    case "open":
+      return { app: call.args.length > 0 || (session?.app ?? false) };
+    case "snapshot":
+      return session ?? (call.selector ? { app: false } : undefined);
+    case "close":
+      return undefined;
+    case "record":
+      if (call.args[0] === "start" && !session && !call.appScope && call.selector)
+        return { app: false, recordingOnly: true };
+      return call.args[0] === "stop" && session?.recordingOnly ? undefined : session;
+    default:
+      return session;
+  }
+};
+
+/** Each session the launchers name after these calls. Aliases may span calls, as in grading. */
+export const agentDeviceSessions = (
+  targets: ReadonlyArray<LauncherTarget>,
+  declared: DeviceWorld["agentDeviceSessions"],
+  history: ReadonlyArray<ShellCall>,
+) => {
+  const sessions = new Map<string, AgentDeviceSession | undefined>();
+  for (const target of targets) {
+    const prior = declared?.[target.deviceId];
+    sessions.set(target.session, prior && { app: prior.app !== undefined });
+  }
+  const variables = new Map<string, string>();
+  for (const { tool, input, output } of history) {
+    const command =
+      tool === "Bash" && typeof input === "object" && input !== null && "command" in input
+        ? input.command
+        : undefined;
+    if (typeof command !== "string") continue;
+    const failed = FAILED.test(output);
+    const actions = shellInvocations(command, variables, false, !failed);
+    // A lone command's failure is its own. A compound call's output may not say which command
+    // failed, so its launcher commands count, as the simulator likely ran them.
+    if (actions.length === 1 && failed) continue;
+    for (const action of actions) {
+      const call =
+        action.executed && !action.remote ? launcherCall(targets, action.words) : undefined;
+      if (call?.tracked !== undefined)
+        sessions.set(call.tracked, afterCall(call, sessions.get(call.tracked)));
+    }
+  }
+  return sessions;
+};
+
+/** What the shell simulator is told of the sessions the launchers name. */
+export const describeSessions = (sessions: ReadonlyMap<string, AgentDeviceSession | undefined>) =>
+  [...sessions]
+    .map(([name, session]) =>
+      session === undefined
+        ? `${name} has not started; no open or snapshot has run in it`
+        : session.recordingOnly
+          ? `${name} holds only a --scope device recording`
+          : session.app
+            ? `${name} is open with an app`
+            : `${name} is open with no app`,
+    )
+    .join("; ");
+
+/** agent-device's human-readable error, with the diagnostics lines its remote client adds. */
+const agentDeviceError = (
+  home: string,
+  session: string,
+  seed: string,
+  error: { readonly code: string; readonly message: string; readonly hint: string },
+) => {
+  const hash = NodeCrypto.createHash("sha256").update(seed).digest();
+  const id = `${hash.readUIntBE(0, 5).toString(36).padStart(8, "0")}-${hash.toString("hex", 5, 9)}`;
+  return [
+    "Exit code 1",
+    `Error (${error.code}): ${error.message}`,
+    `Hint: ${error.hint}`,
+    `Diagnostic ID: ${id}`,
+    `Diagnostics Log: ${home}/.agent-device/remote-diagnostics/${session}/requests/${hash.toString("hex", 9, 17)}.ndjson`,
+  ].join("\n");
+};
+const NO_SESSION_HINT = "Run open first or pass an explicit device selector.";
+
+/**
+ * agent-device 0.21.31's error for a plain launcher command that needs its session before
+ * anything starts the session, as recorded on a real Mac. Both refs name the session (the bound
+ * launcher itself, the shared one through the --session flag device_open returned) and the device.
+ */
+export const agentDeviceSessionError = (
+  targets: ReadonlyArray<LauncherTarget>,
+  sessions: ReadonlyMap<string, AgentDeviceSession | undefined>,
+  command: string,
+) => {
+  const plain = command.trim().replace(/\s+2>&1$/, "");
+  if (/[\n;&|<>`$()\\]/.test(plain)) return undefined;
+  const [action, ...others] = shellInvocations(plain);
+  const call = action && others.length === 0 ? launcherCall(targets, action.words) : undefined;
+  // Unknown flags and --json or debug output stay with the simulator.
+  const flags = [...(call?.flags.keys() ?? [])].filter((flag) => flag.startsWith("--"));
+  if (call?.session === undefined || flags.some((flag) => !FLAGS.has(flag))) return undefined;
+  if (flags.some((flag) => ["--json", "--debug", "--verbose"].includes(flag))) return undefined;
+  const session = sessions.get(call.session);
+  if (call.command === "record" && call.args[0] === "start" && call.appScope) {
+    if (session === undefined && call.selector)
+      return {
+        session: call.session,
+        code: "INVALID_ARGS",
+        message:
+          "record start with app scope and an explicit session requires an active app session; run open <app> first, or use --scope device to record the full screen",
+        hint: "Check command arguments and run --help for usage examples.",
+      };
+    if (session && !session.app && !session.recordingOnly && call.target.iosSimulator)
+      return {
+        session: call.session,
+        code: "UNKNOWN",
+        message:
+          "App-scoped recording requires an active app session; open the app under test before recording.",
+        hint: "Unexpected internal error. Retry with --debug and report the diagnostics log if it persists.",
+      };
+    return undefined;
+  }
+  if (session !== undefined) return undefined;
+  if (NEEDS_SESSION.test(call.command))
+    return {
+      session: call.session,
+      code: "SESSION_NOT_FOUND",
+      message: "No active session. Run open first.",
+      hint: NO_SESSION_HINT,
+    };
+  if (call.command === "close" && call.args.length === 0 && call.selector)
+    return {
+      session: call.session,
+      code: "SESSION_NOT_FOUND",
+      message: "No active session",
+      hint: NO_SESSION_HINT,
+    };
+  return undefined;
+};
 
 const decodeDeviceError = Schema.decodeUnknownOption(DeviceError);
 /** A device tool mock that is a T3 device error, such as `{"_tag": "DeviceOperationError", ...}`. */
@@ -243,6 +488,11 @@ export const makeDeviceTools = Effect.fn("evaluateMcpToolUse.makeDeviceTools")(f
   environment: { readonly cwd: string; readonly platform: string },
 ) {
   const home = /^\/(?:home|Users)\/[^/]+/.exec(environment.cwd)?.[0] ?? "/home/user";
+  for (const id of Object.keys(world.agentDeviceSessions ?? {})) {
+    if (!world.devices.some((device) => device.id === id)) {
+      return yield* Effect.die(new Error(`world.agentDeviceSessions names no device ${id}.`));
+    }
+  }
   const config = ServerConfig.layerTest(environment.cwd, `${home}/.t3`);
   const files = FileSystem.layerNoop({
     makeDirectory: () => Effect.void,
@@ -364,6 +614,7 @@ export const makeDeviceTools = Effect.fn("evaluateMcpToolUse.makeDeviceTools")(f
     clientCapabilities: {},
   });
   const launchers: Array<string> = [];
+  const targets: Array<LauncherTarget> = [];
   const call = Effect.fn("evaluateMcpToolUse.deviceCall")(function* (
     name: string,
     input: unknown,
@@ -399,13 +650,45 @@ export const makeDeviceTools = Effect.fn("evaluateMcpToolUse.makeDeviceTools")(f
     }
     const opened = result.structuredContent;
     if (name === "device_open" && !result.isError && isOpened(opened)) {
-      launchers.push(opened.agentDevice.command);
+      const { command, targetArgs = [], session: bound } = opened.agentDevice;
+      launchers.push(command);
+      // Both refs return the session in the target flags; a bound launcher also names it.
+      const flag = targetArgs.indexOf("--session");
+      const session = bound ?? (flag < 0 ? undefined : targetArgs[flag + 1]);
+      const { device } = opened;
+      if (session !== undefined && device !== undefined)
+        targets.push({
+          command,
+          session,
+          bound: bound !== undefined,
+          deviceId: device.id,
+          iosSimulator: device.platform === "ios" && !device.physical,
+        });
     }
     return { text, isError: result.isError === true };
   });
-  return { call, launchers } satisfies DeviceTools;
+  const sessions = (history: ReadonlyArray<ShellCall>) =>
+    agentDeviceSessions(targets, world.agentDeviceSessions, history);
+  return {
+    call,
+    launchers,
+    sessions,
+    sessionError: (history, command) => {
+      const error = agentDeviceSessionError(targets, sessions(history), command);
+      return error && agentDeviceError(home, error.session, `${history.length}\n${command}`, error);
+    },
+  } satisfies DeviceTools;
 });
 
 const isOpened = Schema.is(
-  Schema.Struct({ agentDevice: Schema.Struct({ command: Schema.String }) }),
+  Schema.Struct({
+    device: Schema.optional(
+      Schema.Struct({ id: Schema.String, platform: Schema.String, physical: Schema.Boolean }),
+    ),
+    agentDevice: Schema.Struct({
+      command: Schema.String,
+      targetArgs: Schema.optional(Schema.Array(Schema.String)),
+      session: Schema.optional(Schema.String),
+    }),
+  }),
 );

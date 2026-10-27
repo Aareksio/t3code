@@ -50,6 +50,7 @@ import { changeRequestsCreatedBy } from "../../apps/server/src/orchestration-v2/
 import { DeviceExpect, gradeDevice } from "./device-grading.ts";
 import {
   AGENT_DEVICE_SHELL,
+  describeSessions,
   deviceFailure,
   type DeviceTools,
   isDeviceTool,
@@ -177,6 +178,13 @@ const McpToolUseWorld = Schema.StructWithRest(
     devices: Schema.optional(Schema.Array(DeviceSummary)),
     /** Labels of the SSH device hosts in `devices`, by id. The local host always exists. */
     deviceHosts: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+    /**
+     * agent-device sessions that prior turns started, by device id, with the app `open` put in
+     * each. Otherwise a device's session starts at its launcher's first `open` in the sample.
+     */
+    agentDeviceSessions: Schema.optional(
+      Schema.Record(Schema.String, Schema.Struct({ app: Schema.optional(Schema.String) })),
+    ),
   }),
   Rest,
 );
@@ -694,13 +702,18 @@ export const makeSample = (testCase: McpToolUseCase, base: Base): Sample => {
 
 /**
  * Builds T3's device tools for a world with devices. Prior device calls whose result is "default"
- * run first, in order and without the case's mocks, so their results and sessions are T3's.
+ * run first, in order and without the case's mocks, so their results and sessions are T3's. As in
+ * the real flow, device_open starts no agent-device session: one starts at a launcher `open` in the
+ * sample's shell history, prior turns included, or where `world.agentDeviceSessions` declares it.
  */
 export const withDevices = Effect.fn("evaluateMcpToolUse.withDevices")(function* (sample: Sample) {
   const world = sample.testCase.setup.world;
   if (world?.devices === undefined) return;
-  const { devices, deviceHosts } = world;
-  sample.devices = yield* makeDeviceTools({ devices, deviceHosts }, sample.base.environment);
+  const { devices, deviceHosts, agentDeviceSessions } = world;
+  sample.devices = yield* makeDeviceTools(
+    { devices, deviceHosts, agentDeviceSessions },
+    sample.base.environment,
+  );
   for (const call of (sample.testCase.setup.priorTurns ?? []).flatMap((t) => t.toolCalls ?? [])) {
     if (call.result !== "default" || !isDeviceTool(call.tool)) continue;
     sample.priorResults.set(call, (yield* sample.devices.call(call.tool, call.input)).text);
@@ -1068,6 +1081,7 @@ export const shellRequest = (sample: Sample, call: Omit<ShellEntry, "output">, m
   const { world, context, shellMocks = [] } = testCase.setup;
   const { cwd, platform, date } = base.environment;
   const launchers = [...new Set(devices?.launchers)];
+  const sessions = devices?.sessions(shell);
   const machine = [
     `Working directory: ${cwd} on ${platform}, a git checkout of github.com/${repo}.${date ? ` Today is ${date}.` : ""}`,
     gitStatus(testCase),
@@ -1078,6 +1092,7 @@ export const shellRequest = (sample: Sample, call: Omit<ShellEntry, "output">, m
     ...(launchers.length > 0
       ? [`agent-device launchers T3's device_open returned: ${launchers.join(", ")}`]
       : []),
+    ...(sessions?.size ? [`Their agent-device sessions: ${describeSessions(sessions)}.`] : []),
     ...(context ? [`The agent was told: ${context}`] : []),
     `The agent's task: ${testCase.prompt}`,
   ];
@@ -1126,19 +1141,22 @@ type Config = {
 };
 
 /**
- * Output for a shell, file, or web tool: a matching shell mock, agent-device's help for a
- * launcher T3 returned, else the shell simulator.
+ * Output for a command that needs no simulator: a matching shell mock, else, for a plain command
+ * on a launcher T3 returned, agent-device's help or its error for a session not yet started.
  */
+export const cannedOutput = (sample: Sample, command: string) =>
+  mockOutput(sample, command) ??
+  launcherHelp(sample.devices?.launchers ?? [], command) ??
+  sample.devices?.sessionError(sample.shell, command);
+
+/** Output for a shell, file, or web tool: canned output, else the shell simulator. */
 const simulate = Effect.fn("evaluateMcpToolUse.simulate")(function* (
   sample: Sample,
   config: Config,
   call: Omit<ShellEntry, "output">,
 ) {
   const command = call.tool === "Bash" && isRecord(call.input) ? call.input.command : undefined;
-  let output =
-    typeof command === "string"
-      ? (mockOutput(sample, command) ?? launcherHelp(sample.devices?.launchers ?? [], command))
-      : undefined;
+  let output = typeof command === "string" ? cannedOutput(sample, command) : undefined;
   if (output === undefined) {
     const body = shellRequest(sample, call, config.shellModel);
     const response = yield* callModel(

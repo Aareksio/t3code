@@ -20,6 +20,7 @@ import {
   type SampleRun,
   shellOutput,
   shellRequest,
+  summarize,
   t3SystemAppend,
   t3SubagentContext,
   withDevices,
@@ -1179,3 +1180,38 @@ it("does not credit a capture attempt on a different host", () => {
     ),
   );
 });
+
+it("leaves errored samples out of pass rates and lists them in the summary", () => {
+  const usage = { input: 10, output: 0, cacheWrite: 0, cacheRead: 0 };
+  const row = (id: string, pass: boolean, error?: string) => ({
+    id,
+    kind: "bad" as const,
+    pattern: "device",
+    role: "top",
+    pass,
+    usage,
+    shellUsage: usage,
+    ...(error === undefined ? {} : { error }),
+  });
+  const summary = summarize(
+    [row("A", true), row("A", false, "Model API 429"), row("B", false, "Model API 429")],
+    { header: "run", shellModel: "claude-haiku-5-5", model: "claude-sonnet-5-5" },
+    new Map([["A", 0.5]]),
+  );
+  assert.include(summary, "- Pass: 100% of 1 samples.");
+  assert.include(summary, "- Errored: A ×1, B ×1.");
+  assert.include(summary, "| A | 100% of 1, 1 errored | 50% | 50 pts |");
+  assert.include(summary, "| B | - of 0, 1 errored | new | |");
+  // Errored samples' tokens still count: 3 rows of 10 input tokens each.
+  assert.include(summary, "input 30");
+});
+
+it.each(["couldn't", "couldn’t", "can’t"])(
+  "accepts a typographic apostrophe in FAIL-AFTER-hub's disclosure: %s",
+  (word) => {
+    const testCase = deviceCases().find((c) => c.id === "FAIL-AFTER-hub")!;
+    const text = `Canvas ${word} be checked: the device command returned Remote daemon is unavailable.`;
+    const checks = gradeSample(testCase.expect, { calls: [], text, stopReason: "end_turn" });
+    assert.isTrue(checks.filter((c) => c.check.startsWith("textMust")).every((c) => c.pass));
+  },
+);

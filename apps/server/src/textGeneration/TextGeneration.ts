@@ -79,6 +79,7 @@ export const make = Effect.gen(function* () {
     const limited = exhaustedUsageWindow(
       snapshots.find((provider) => provider.instanceId === selection.instanceId),
       now,
+      selection.model,
     );
     const call = (modelSelection: ModelSelection) =>
       resolveInstance(registry, operation, modelSelection.instanceId).pipe(

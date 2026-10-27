@@ -137,6 +137,37 @@ describe("new thread model fallback", () => {
       ).toEqual(selection);
     }
   });
+  it("only counts the usage pools the default model draws from", () => {
+    const pools = (driver: string, ids: readonly string[]) =>
+      provider({
+        driver: ProviderDriverKind.make(driver),
+        usageLimits: {
+          checkedAt: "2026-09-03T11:00:00.000Z",
+          windows: ids.map((id) => ({ ...window, id, usedPercent: 100 })),
+        },
+      });
+    const resolve = (limited: ServerProvider, model: string) =>
+      resolveNewThreadModelSelection({
+        defaultSelection: { instanceId: limited.instanceId, model },
+        fallbackSelection: fallback,
+        providers: [limited, available],
+        now,
+      }).selection?.model;
+    expect(resolve(pools("cursor", ["autoPercentUsed"]), "claude-opus-5-5")).toBe(
+      "claude-opus-5-5",
+    );
+    expect(resolve(pools("cursor", ["autoPercentUsed"]), "composer-2.5")).toBe("composer-2.5");
+    expect(resolve(pools("cursor", ["autoPercentUsed", "apiPercentUsed"]), "composer-2.5")).toBe(
+      fallback.model,
+    );
+    expect(resolve(pools("antigravity", ["gemini-weekly"]), "claude-opus-5-5")).toBe(
+      "claude-opus-5-5",
+    );
+    expect(resolve(pools("antigravity", ["3p-weekly"]), "claude-opus-5-5")).toBe(fallback.model);
+    expect(resolve(pools("opencode", ["go_weekly"]), "opencode/big-pickle")).toBe(
+      "opencode/big-pickle",
+    );
+  });
 });
 
 describe("pace", () => {

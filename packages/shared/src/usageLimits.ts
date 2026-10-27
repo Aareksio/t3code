@@ -21,8 +21,12 @@ const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
-export function exhaustedUsageWindow(provider: ServerProvider | undefined, now: number) {
-  return provider?.usageLimits?.windows.find(
+export function exhaustedUsageWindow(
+  provider: ServerProvider | undefined,
+  now: number,
+  model?: string,
+) {
+  const exhausted = (provider?.usageLimits?.windows ?? []).filter(
     (window) =>
       window.usedPercent !== undefined &&
       window.usedPercent >= 100 &&
@@ -30,6 +34,32 @@ export function exhaustedUsageWindow(provider: ServerProvider | undefined, now: 
         !Number.isFinite(Date.parse(window.resetsAt)) ||
         Date.parse(window.resetsAt) > now),
   );
+  if (model === undefined) return exhausted[0];
+  // Some drivers report separate allowances per model family; only the ones this model draws from count.
+  switch (provider?.driver) {
+    case "cursor": {
+      const api = exhausted.find((window) => window.id === "apiPercentUsed");
+      const auto = exhausted.find((window) => window.id === "autoPercentUsed");
+      return /^(auto|default|grok|composer)/.test(model) ? auto && api : api;
+    }
+    case "antigravity": {
+      const family = model.match(/^(gemini|claude|gpt)-/)?.[1];
+      return exhausted.find((window) => {
+        const pool = window.id.match(/^(gemini|claude|gpt|3p)-/)?.[1];
+        return (
+          pool === undefined ||
+          pool === family ||
+          (pool === "3p" && (family === "claude" || family === "gpt"))
+        );
+      });
+    }
+    case "opencode":
+      return exhausted.find(
+        (window) => !window.id.startsWith("go_") || model.startsWith("opencode-go/"),
+      );
+    default:
+      return exhausted[0];
+  }
 }
 
 export function resolveNewThreadModelSelection(input: {
@@ -45,7 +75,7 @@ export function resolveNewThreadModelSelection(input: {
   const unchanged = { selection, fallback: null };
   if (input.explicitSelection || !selection || !input.fallbackSelection) return unchanged;
   const provider = input.providers.find((entry) => entry.instanceId === selection.instanceId);
-  const window = exhaustedUsageWindow(provider, input.now);
+  const window = exhaustedUsageWindow(provider, input.now, selection.model);
   const fallback = input.providers.find(
     (entry) => entry.instanceId === input.fallbackSelection?.instanceId,
   );
@@ -56,7 +86,7 @@ export function resolveNewThreadModelSelection(input: {
     !fallback.installed ||
     fallback.auth.status === "unauthenticated" ||
     !isProviderAvailable(fallback) ||
-    exhaustedUsageWindow(fallback, input.now) ||
+    exhaustedUsageWindow(fallback, input.now, input.fallbackSelection.model) ||
     (input.settings &&
       !resolveProjectProviderInstanceEnabled(
         input.settings,

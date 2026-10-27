@@ -522,6 +522,7 @@ it.each([
   "# shot() { xcrun simctl io PRIVATE screenshot /tmp/a.png; }\nshot",
   "echo ready # shot() { xcrun simctl io PRIVATE screenshot /tmp/a.png; }\nshot",
   "exit 0; xcrun simctl io PRIVATE screenshot /tmp/a.png",
+  "f() { f; }; f",
   "ssh build-mac agent-device --version",
   "ssh build-mac agent-device help longpress",
 ])("allows auxiliary shell work: %s", (command) => {
@@ -561,6 +562,8 @@ it.each([
   "ssh build-mac /opt/homebrew/bin/agent-device batch --file /tmp/steps.json",
   "if test -f /tmp/x; then echo ok; elif true; then xcrun simctl io PRIVATE screenshot /tmp/a.png; fi",
   "(exit 0); xcrun simctl io PRIVATE screenshot /tmp/a.png",
+  "shot() { xcrun simctl io PRIVATE screenshot /tmp/a.png; }; verify() { shot; }; verify",
+  "ssh build-mac 'bash -se' <<'EOF'\nxcrun simctl io PRIVATE screenshot /tmp/a.png\nEOF",
   // An uncertain short-circuit, and line continuations.
   "test -f /tmp/flag && true || xcrun simctl io PRIVATE screenshot /tmp/a.png",
   "ssh build-mac xcrun simctl io PRIVATE \\\n  screenshot /tmp/a.png",
@@ -1410,6 +1413,16 @@ it.each([
   [
     "an if whose condition list succeeds",
     "if false || true; then LAUNCHER record start /tmp/demo/voice.mp4; LAUNCHER record stop; fi",
+    true,
+  ],
+  [
+    "an exit inside a called function",
+    "demo() { LAUNCHER record start /tmp/demo/voice.mp4; exit 0; }; demo; LAUNCHER record stop",
+    false,
+  ],
+  [
+    "a return inside a called function",
+    "demo() { LAUNCHER record start /tmp/demo/voice.mp4; return 0; }; demo; LAUNCHER record stop",
     true,
   ],
   [

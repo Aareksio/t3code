@@ -339,7 +339,18 @@ export function shellInvocations(
   variables = new Map<string, string>(),
   remote = false,
   succeeded = false,
+  /** Shared with function calls: the shell's functions, and whether it exited. */
+  shell: {
+    functions: Map<string, { text: string; certain: boolean }>;
+    exited: boolean;
+    depth: number;
+  } = {
+    functions: new Map(),
+    exited: false,
+    depth: 0,
+  },
 ): ShellInvocation[] {
+  if (shell.depth > 8) return [];
   const bodies = new Map<string, { text: string; expand: boolean }>();
   command = command.replace(
     /^([^\n]*?)<<(-?)\s*(['"]?)(\w+)\3([^\n]*)\n([\s\S]*?)(?:\n[ \t]*\4[ \t]*(?=\n|(?![\s\S]))|(?![\s\S]))/gm,
@@ -394,7 +405,7 @@ export function shellInvocations(
   };
   const commandTokens = tokens(command.replace(/(^|\n)[ \t]*#[^\n]*/g, "$1"));
   let tokenIndex = 0;
-  const functions = new Map<string, { text: string; certain: boolean }>();
+  const functions = shell.functions;
   const listTokens = () => {
     let start = tokenIndex - 1,
       end = tokenIndex;
@@ -545,8 +556,11 @@ export function shellInvocations(
     while (words[0] === "!") words.shift();
     words = unwrap(words);
     if (/^(?:exit|return)$/.test(executable(words[0]))) {
-      if (currentCertain) exited = true;
-      else certain = false;
+      if (currentCertain) {
+        exited = true;
+        // `exit` in a function ends the shell; `return` ends only the function.
+        if (executable(words[0]) === "exit") shell.exited = true;
+      } else certain = false;
       return;
     }
     const name = executable(words[0]);
@@ -567,12 +581,13 @@ export function shellInvocations(
     }
     if (functions.has(name)) {
       const definition = functions.get(name)!;
+      const call = { functions, exited: false, depth: shell.depth + 1 };
       append(
-        shellInvocations(definition.text, new Map(variables), remote, succeeded).map((action) => ({
-          ...action,
-          executed: action.executed && definition.certain,
-        })),
+        shellInvocations(definition.text, new Map(variables), remote, succeeded, call).map(
+          (action) => ({ ...action, executed: action.executed && definition.certain }),
+        ),
       );
+      if (call.exited && definition.certain && currentCertain) exited = shell.exited = true;
       return;
     }
     if (name === "ssh") {
@@ -588,7 +603,9 @@ export function shellInvocations(
       // A remote shell/interpreter inherits redirected/piped stdin, never the local aliases.
       const destination = unwrap(tokens(script).map((word) => unquote(word, new Map())));
       const reader = executable(destination[0]);
-      const hasProgram = destination.some((word) => /^-[a-z]*[ce][a-z]*$/.test(word));
+      // Shells take a program with -c (`bash -se` reads stdin); interpreters with -c or -e.
+      const programFlag = shells.has(reader) ? /^-[a-z]*c[a-z]*$/ : /^-[a-z]*[ce][a-z]*$/;
+      const hasProgram = destination.some((word) => programFlag.test(word));
       if (
         input !== undefined &&
         (!reader || ((shells.has(reader) || interpreter.test(reader)) && !hasProgram))
@@ -600,7 +617,9 @@ export function shellInvocations(
       return;
     }
     if (shells.has(name) || interpreter.test(name)) {
-      const at = words.findIndex((word) => /^-[a-z]*[ce][a-z]*$/.test(word));
+      const at = words.findIndex((word) =>
+        (shells.has(name) ? /^-[a-z]*c[a-z]*$/ : /^-[a-z]*[ce][a-z]*$/).test(word),
+      );
       if (at >= 0) input = words[at + 1];
       if (input !== undefined)
         append(

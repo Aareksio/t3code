@@ -355,7 +355,13 @@ export function shellInvocations(
   let pipe: string | undefined;
   let gate = "";
   let status: boolean | undefined;
-  const conditions: Array<{ parent: boolean; certain: boolean; take: boolean | undefined }> = [];
+  // `before` says whether an earlier if/elif branch of this statement ran: true, false or unknown.
+  const conditions: Array<{
+    parent: boolean;
+    certain: boolean;
+    take: boolean | undefined;
+    before: boolean | undefined;
+  }> = [];
   let active = true;
   let certain = true;
   let currentCertain = true;
@@ -412,19 +418,22 @@ export function shellInvocations(
         parent,
         certain,
         take: truth(words.slice(1)),
+        before: false,
       });
       words.shift();
     }
     if (words[0] === "then") {
       const condition = conditions.at(-1);
-      active = condition?.parent !== false && condition?.take !== false;
-      certain = condition?.certain !== false && condition?.take === true;
+      active =
+        condition?.parent !== false && condition?.take !== false && condition?.before !== true;
+      certain =
+        condition?.certain !== false && condition?.take === true && condition?.before === false;
       words.shift();
     }
     if (words[0] === "else") {
       const condition = conditions.at(-1);
-      active = !!condition?.parent && condition.take !== true;
-      certain = !!condition?.certain && condition.take === false;
+      active = !!condition?.parent && condition.take !== true && condition.before !== true;
+      certain = !!condition?.certain && condition.take === false && condition.before === false;
       words.shift();
     }
     if (words[0] === "fi") {
@@ -434,11 +443,19 @@ export function shellInvocations(
       words.shift();
     }
     if (words[0] === "elif") {
-      // Any elif branch may run, so inspect them all.
+      // An elif's condition runs only when no earlier branch did.
       const condition = conditions.at(-1);
-      active = condition?.parent ?? true;
-      certain = false;
-      if (condition) condition.take = undefined;
+      if (condition) {
+        condition.before =
+          condition.before === true || condition.take === true
+            ? true
+            : condition.before === false && condition.take === false
+              ? false
+              : undefined;
+        condition.take = condition.before === true ? false : truth(words.slice(1));
+        active = condition.parent && condition.before !== true;
+        certain = condition.certain && condition.before === false;
+      }
       words.shift();
     }
     const loopList = /^(?:for|select)$/.test(words[0] ?? "");
@@ -452,6 +469,7 @@ export function shellInvocations(
         parent: active,
         certain,
         take: words[0] === "until" && value !== undefined ? !value : value,
+        before: false,
       });
       if (!loopList) words.shift();
     }
@@ -609,6 +627,13 @@ export function shellInvocations(
   let redirectOperands: string[] = [];
   for (; tokenIndex < commandTokens.length; tokenIndex++) {
     const token = commandTokens[tokenIndex]!;
+    // Comments come first, so a commented-out function definition is never registered.
+    if (token === "\n") comment = false;
+    if (comment) continue;
+    if (token.startsWith("#")) {
+      comment = true;
+      continue;
+    }
     // Shell function definitions don't execute their bodies. Keep literal calls supported.
     const nameAt = tokenIndex + (token === "function" ? 1 : 0);
     const bodyAt =
@@ -631,12 +656,6 @@ export function shellInvocations(
           certain,
         });
       tokenIndex = end - 1;
-      continue;
-    }
-    if (token === "\n") comment = false;
-    if (comment) continue;
-    if (token.startsWith("#")) {
-      comment = true;
       continue;
     }
     if (/^\d*(?:>>?|<)(?:&\d+)?$/.test(token)) {

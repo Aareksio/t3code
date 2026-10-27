@@ -518,6 +518,9 @@ it.each([
   "ssh build-mac 'python3 -' <<'PY'\nimport subprocess\nsubprocess.run(['xcrun', 'simctl', 'install', 'PRIVATE', '/tmp/Acme.app'])\nPY",
   "for s in AcmeApp AcmeWidget; do ssh build-mac xcodebuild -scheme $s build; done",
   "while ! ssh build-mac test -f /tmp/ready; do sleep 1; done",
+  "if true; then echo ok; elif true; then xcrun simctl io PRIVATE screenshot /tmp/a.png; fi",
+  "# shot() { xcrun simctl io PRIVATE screenshot /tmp/a.png; }\nshot",
+  "echo ready # shot() { xcrun simctl io PRIVATE screenshot /tmp/a.png; }\nshot",
   "ssh build-mac agent-device --version",
   "ssh build-mac agent-device help longpress",
 ])("allows auxiliary shell work: %s", (command) => {
@@ -555,6 +558,7 @@ it.each([
   // Every agent-device command over ssh bypasses T3, including ones outside a fixed verb list.
   "ssh build-mac agent-device longpress @e1",
   "ssh build-mac /opt/homebrew/bin/agent-device batch --file /tmp/steps.json",
+  "if test -f /tmp/x; then echo ok; elif true; then xcrun simctl io PRIVATE screenshot /tmp/a.png; fi",
   // An uncertain short-circuit, and line continuations.
   "test -f /tmp/flag && true || xcrun simctl io PRIVATE screenshot /tmp/a.png",
   "ssh build-mac xcrun simctl io PRIVATE \\\n  screenshot /tmp/a.png",
@@ -1341,6 +1345,46 @@ it("charges failed raw device attempts, such as agent-device over ssh, to the fa
   }));
   const checks = gradeDevice({ maxFailedAttemptsPerTurn: 2 }, { calls });
   assert.isFalse(checks.find((c) => c.check.startsWith("maxCalls device"))?.pass);
+});
+
+it.each([
+  [
+    "a reachable elif branch",
+    "if false; then :; elif true; then LAUNCHER screenshot /tmp/a.png; fi",
+    true,
+  ],
+  [
+    "an elif after a taken branch",
+    "if true; then :; elif true; then LAUNCHER screenshot /tmp/a.png; fi",
+    false,
+  ],
+] as const)("credits a managed capture in an if statement by its branch: %s", (_, script, pass) => {
+  const c = deviceCases().find((c) => c.id === "HOST-01a")!;
+  const launcher = "/home/user/.t3/userdata/device/bin/agent-device";
+  const input = {
+    hostId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    deviceId: "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB",
+  };
+  const calls = [
+    { step: 0, tool: "device_open", input, failed: false },
+    {
+      step: 1,
+      tool: "Bash",
+      failed: false,
+      input: { command: script.replace("LAUNCHER", launcher) },
+    },
+  ];
+  const run = {
+    calls,
+    launchers: [launcher],
+    text: "/tmp/proof/settings.png",
+    stopReason: "end_turn",
+  };
+  const checks = gradeSample(c.expect, run);
+  assert.equal(
+    checks.find((c) => c.check === "device successful open and capture attempt")?.pass,
+    pass,
+  );
 });
 
 it("leaves errored samples out of pass rates and lists them in the summary", () => {

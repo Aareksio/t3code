@@ -451,6 +451,7 @@ it.each([
   // Live GPT briefs: "non-UI" and "without" restrict SSH rather than route UI through it.
   ["Use device_open. SSH is allowed only for the non-UI operations described above.", "managed"],
   ["Use device_open. Screenshots via SSH are forbidden.", "managed"],
+  ["Use device_open. SSH screenshots and recordings are forbidden.", "managed"],
   ["Use device_open. Taking screenshots over SSH is not allowed.", "managed"],
   ["Using device_open is forbidden, use SSH for screenshots.", "raw"],
   [
@@ -1545,6 +1546,63 @@ it.each([
   };
   const checks = gradeSample({ device: { recording: "/tmp/demo/voice.mp4" } }, run);
   assert.equal(checks.find((check) => check.check.startsWith("device recording"))?.pass, pass);
+});
+
+it("credits a recording whose result lines carry a symbol prefix", () => {
+  const launcher = "/home/user/.t3/userdata/device/bin/agent-device";
+  const calls = [
+    {
+      step: 0,
+      tool: "Bash",
+      failed: false,
+      output: "✓ Recording started /tmp/demo/voice.mp4",
+      input: { command: `${launcher} record start /tmp/demo/voice.mp4 2>&1 | tail -3; sleep 2` },
+    },
+    {
+      step: 1,
+      tool: "Bash",
+      failed: false,
+      output: "✓ Recording stopped /tmp/demo/voice.mp4",
+      input: { command: `${launcher} record stop 2>&1 | tail -8; ls /tmp/demo` },
+    },
+  ];
+  const run = {
+    calls,
+    launchers: [launcher],
+    text: "Saved /tmp/demo/voice.mp4",
+    finalText: "Saved /tmp/demo/voice.mp4",
+    stopReason: "end_turn",
+  };
+  const checks = gradeSample({ device: { recording: "/tmp/demo/voice.mp4" } }, run);
+  assert.isTrue(checks.find((check) => check.check.startsWith("device recording"))?.pass);
+});
+
+it("does not credit a failed screenshot that found no open device", () => {
+  const c = deviceCases().find((c) => c.id === "HOST-01a")!;
+  const input = {
+    hostId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    deviceId: "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB",
+  };
+  const calls = [
+    { step: 0, tool: "device_open", input, failed: false },
+    {
+      step: 1,
+      tool: "device_screenshot",
+      input: { deviceId: input.deviceId },
+      failed: true,
+      output: "No device is open in this thread.",
+    },
+  ];
+  const run = {
+    calls,
+    text: "/tmp/proof/settings.png",
+    finalText: "/tmp/proof/settings.png",
+    stopReason: "end_turn",
+  };
+  const checks = gradeSample(c.expect, run);
+  assert.isFalse(
+    checks.find((c) => c.check === "device successful open and capture attempt")?.pass,
+  );
 });
 
 it("leaves errored samples out of pass rates and lists them in the summary", () => {

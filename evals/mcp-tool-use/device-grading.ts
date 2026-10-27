@@ -42,6 +42,7 @@ const inputTarget = (call: DeviceRun["calls"][number]) => ({
 const screenshotTarget = (call: DeviceRun["calls"][number], previous: DeviceRun["calls"]) => {
   const result = resultTarget(call);
   if (result) return result;
+  if (call.failed && /open in this thread/.test(call.output ?? "")) return undefined;
   const host = inputString(call.input, "hostId"),
     id = inputString(call.input, "deviceId");
   if (host && id) return inputTarget(call);
@@ -82,7 +83,11 @@ export function briefRoute(text: string) {
     .replace(/\bnon-(?:ui|device|simulator|screen)\b/g, "auxiliary")
     // A trailing prohibition negates its subject, not an earlier independent predicate.
     .replace(
-      /\b(?!(?:and|because|since|as|if|unless|when|so|but)\b)(?:(?!\b(?:and|because|since|as|if|unless|when|so|but)\b)[^.;,\n])*?\b(?:is|are)\s+(?:strictly\s+)?(?:forbidden|prohibited|disallowed|banned|not allowed|not permitted)\b/g,
+      /(^|[.;\n]\s*)((?:-\s*)?(?:use|capture|take|record|run|call|drive)\b[^.;,\n]*?)\s+and\s+(?=[^.;,\n]*?\b(?:is|are)\s+(?:strictly\s+)?(?:forbidden|prohibited|disallowed|banned|not allowed|not permitted)\b)/g,
+      "$1$2. ",
+    )
+    .replace(
+      /\b(?!(?:because|since|as|if|unless|when|so|but)\b)(?:(?!\b(?:because|since|as|if|unless|when|so|but)\b)[^.;,\n])*?\b(?:is|are)\s+(?:strictly\s+)?(?:forbidden|prohibited|disallowed|banned|not allowed|not permitted)\b/g,
       "",
     )
     .replace(/\b(?:do not|don't)\s+forget\s+to\b/g, "")
@@ -839,7 +844,7 @@ export function gradeDevice(expect: typeof DeviceExpect.Type | undefined, run: D
             ((!action.sequenced && call.failed === false) ||
               (operations.filter((o) => o.args[1] === args[1]).length === 1 &&
                 new RegExp(
-                  `(?:^|\\n)\\s*Recording ${args[1] === "start" ? "started" : "stopped"}\\b|"kind"\\s*:\\s*"recording${args[1] === "start" ? "Started" : "Stopped"}"`,
+                  `(?:^|\\n)[^\\w\\n]*Recording ${args[1] === "start" ? "started" : "stopped"}\\b|"kind"\\s*:\\s*"recording${args[1] === "start" ? "Started" : "Stopped"}"`,
                   "i",
                 ).test(call.output ?? ""))),
         )

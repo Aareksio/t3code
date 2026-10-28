@@ -107,7 +107,7 @@ export function trackSwitchBlockReason(input: {
   const to = cliReleaseChannelOf(input.targetVersion);
   if (from === to || from === "preview" || to === "preview") return null;
   if (input.targetDatabaseMigration === undefined) {
-    return `Cannot confirm this database works with t3@${input.targetVersion}; it stays on this release.`;
+    return `Cannot confirm this database works with t3@${input.targetVersion}. Switch tracks from Settings → About → Update track, which checks it first.`;
   }
   return input.targetDatabaseMigration < input.databaseMigration
     ? `This database has changes t3@${input.targetVersion} does not support yet; it stays on this release.`

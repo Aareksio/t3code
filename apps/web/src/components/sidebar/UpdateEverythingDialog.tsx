@@ -2,7 +2,7 @@ import { useAtomValue } from "@effect/atom-react";
 import { EnvironmentId } from "@t3tools/contracts";
 import { Atom } from "effect/reactivity";
 import { ChevronRightIcon } from "lucide-react";
-import { Fragment, type RefObject, useRef } from "react";
+import { Fragment, type RefObject, useId, useRef } from "react";
 
 import { environmentThreadShells } from "~/state/threads";
 import {
@@ -54,6 +54,7 @@ type UpdateEverythingDialogContentProps = Omit<
   "open" | "onOpenChange"
 > & {
   readonly cancelRef: RefObject<HTMLButtonElement | null>;
+  readonly descriptionId: string;
 };
 
 export function UpdateEverythingDialog({
@@ -62,15 +63,25 @@ export function UpdateEverythingDialog({
   ...content
 }: UpdateEverythingDialogProps) {
   const cancelRef = useRef<HTMLButtonElement>(null);
+  const descriptionId = useId();
   return (
     <AlertDialog open={open} onOpenChange={onOpenChange}>
       {/* Refocusing the trigger after a pointer close shows its focus ring and opens its tooltip. */}
       <AlertDialogPopup
         className="sm:max-w-xl"
+        aria-describedby={
+          content.rows.some((row) => row.app !== null)
+            ? `${descriptionId} ${descriptionId}-interruption`
+            : descriptionId
+        }
         initialFocus={cancelRef}
         finalFocus={(closeType) => closeType === "keyboard"}
       >
-        <UpdateEverythingDialogContent {...content} cancelRef={cancelRef} />
+        <UpdateEverythingDialogContent
+          {...content}
+          cancelRef={cancelRef}
+          descriptionId={descriptionId}
+        />
       </AlertDialogPopup>
     </AlertDialog>
   );
@@ -89,6 +100,7 @@ function UpdateEverythingDialogContent({
   restarts,
   onConfirm,
   cancelRef,
+  descriptionId,
 }: UpdateEverythingDialogContentProps) {
   const stopped = useAtomValue(
     runningThreadCountAtom(
@@ -118,7 +130,7 @@ function UpdateEverythingDialogContent({
         <AlertDialogTitle>
           Update {updating.length} {updating.length === 1 ? "machine" : "machines"}?
         </AlertDialogTitle>
-        <AlertDialogDescription>
+        <AlertDialogDescription id={descriptionId}>
           {version !== null ? (
             <>
               T3 Code <span className="font-mono text-xs">{version}</span>
@@ -199,8 +211,12 @@ function UpdateEverythingDialogContent({
         {/* Thread counts come from client snapshots that can still be loading, so the warning
             cannot depend on them. */}
         {updating.some((row) => row.app !== null) ? (
-          <p className="self-center text-muted-foreground text-sm max-sm:order-1 max-sm:text-center sm:mr-auto">
-            Running tasks and tool calls will be interrupted.
+          <p
+            id={`${descriptionId}-interruption`}
+            className="self-center text-muted-foreground text-sm max-sm:order-1 max-sm:text-center sm:mr-auto"
+          >
+            Running tasks and tool calls will be interrupted. Tool calls in progress will not
+            resume.
             {running === 0
               ? null
               : stopped === 0

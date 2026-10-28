@@ -415,6 +415,12 @@ export class Simulator {
         .slice(0, 14)
         .join(" | ")})\n`,
     );
+    await this.relaunch(threadListLabel);
+  }
+
+  /** Starts the app again; it opens on the thread list with nothing selected. */
+  async relaunch(threadListLabel: RegExp) {
+    if (!this.metroUrl) throw new Error("the app was never launched");
     await this.launch(this.metroUrl, { restart: true });
     await this.waitFor(threadListLabel, "the thread list after a relaunch", { offScreen: true });
   }

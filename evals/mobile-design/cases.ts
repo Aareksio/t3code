@@ -90,6 +90,8 @@ export interface Scene {
   readonly steps: ReadonlyArray<StepAction>;
   /** Wait for this label before the screenshot. */
   readonly ready?: string;
+  /** Relaunch first: on iPad, a thread an earlier scene opened would fill the detail column. */
+  readonly fresh?: true;
   /** Desktop web path for the "conforms to desktop" pair, relative to the environment origin. */
   readonly desktop?: { readonly path: string; readonly click?: string };
   /** Runs after the screenshot, to undo state later scenes would see, such as a typed draft. */
@@ -105,6 +107,7 @@ export const SCENES = [
     title: "Thread list",
     source: `${REQUEST}; #22543 (iPad sidebar hides the newest thread)`,
     steps: [],
+    fresh: true,
     ready: "^Plan offline mode",
     desktop: { path: "/" },
   },
@@ -221,7 +224,8 @@ export const SCENES = [
     title: "Review and diff",
     source: REQUEST,
     steps: [{ link: "threads/{thread:remote-command-center}/review" }],
-    ready: "^Changes vs",
+    // Older builds title it "Changes vs main"; newer ones put "vs main" on a second line.
+    ready: "^(Changes )?vs main",
   },
   {
     id: "settings",
@@ -299,7 +303,7 @@ export const FLOWS = [
       { tap: "^(New chat|New thread)$" },
       // New thread can open straight onto the project picker, or a draft with one project chip.
       { tap: ["^Project: ", "^T3 Code$"], skipIf: "^Choose project$" },
-      { tap: "^React$" },
+      { tap: "^React(,|$)" },
       // A build whose project chip also names the machine has no separate machine step.
       { tap: "^Choose environment", skipIf: "^Project: " },
       // Pick whichever machine the picker offers; when it is not the project's, the frames show it.
@@ -328,9 +332,9 @@ export const FLOWS = [
     steps: [
       { tap: "^Make remote coding feel local" },
       // A crowded header folds its buttons into a More menu.
-      { tap: ["^Changes [+]", "^(Git|Panel|Toggle panel)$", "^More$"] },
+      { tap: ["^(Changes )?[+]\\d+ [-−]\\d+", "^(Git|Panel|Toggle panel)$", "^More$"] },
       {
-        tap: ["^Changes [+]", "^(Review changes|Diff$)", "^(Panel|Toggle panel)$"],
+        tap: ["^(Changes )?[+]\\d+ [-−]\\d+", "^(Review changes|Diff$)", "^(Panel|Toggle panel)$"],
         skipIf: "^(Select diff|Open full review)$",
       },
       { tap: "^Diff$", optional: true, skipIf: "^(Select diff|Open full review)$" },

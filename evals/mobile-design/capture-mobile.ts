@@ -111,7 +111,7 @@ async function captureScene(
   const file = NodePath.join("captures", pose.id, `${scene.id}.png`);
   let problem = poseProblem;
   try {
-    await simulator.home(THREAD_LIST);
+    await ("fresh" in scene ? simulator.relaunch(THREAD_LIST) : simulator.home(THREAD_LIST));
     await simulator.withUsableTaps(async () => {
       for (const step of scene.steps) await simulator.perform(step, targets);
     });

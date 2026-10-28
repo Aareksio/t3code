@@ -125,8 +125,11 @@ function SimlockHostsRow() {
           >
             Simlock
           </a>{" "}
-          pool, added under Integrations. An alpha that may change or break. T3 Code never installs
-          Simlock.
+          pool, added in{" "}
+          <Link to="/settings/devices" className="underline underline-offset-2">
+            Devices
+          </Link>
+          . An alpha that may change or break. T3 Code never installs Simlock.
         </>
       }
       control={

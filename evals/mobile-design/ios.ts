@@ -319,10 +319,12 @@ export class Simulator {
     );
   }
 
-  async tap(label: RegExp) {
+  /** Taps the first element labelled `label`, and returns the label it tapped. */
+  async tap(label: RegExp): Promise<string> {
     const node = this.find(await this.waitFor(label, `'${label.source}'`), label);
     if (!node) throw new Error(`nothing labelled ${label}`);
     await this.press(node);
+    return (node.label ?? "").split(",")[0]!.slice(0, 40);
   }
 
   /** The composer is a native text view with no label: the lowest editable field on screen. */
@@ -335,14 +337,17 @@ export class Simulator {
     return composer;
   }
 
-  async perform(step: StepAction, targets: LinkTargets) {
+  /** Performs one step; returns the tapped label for a `tap` step. */
+  async perform(step: StepAction, targets: LinkTargets): Promise<string | undefined> {
+    let tapped: string | undefined;
     if ("link" in step) await this.openUrl(`t3code://${expandPath(step.link, targets)}`);
-    else if ("tap" in step) await this.tap(new RegExp(step.tap));
+    else if ("tap" in step) tapped = await this.tap(new RegExp(step.tap));
     else if ("type" in step) await this.agent(["type", step.type]);
     else if ("scroll" in step) await this.agent(["scroll", step.scroll]);
     else if ("focus" in step) await this.press(await this.composer());
     else await this.agent(["fill", `@${(await this.composer()).ref}`, ""]);
     await delay(1_200);
+    return tapped;
   }
 
   /** Backs out of sheets, pushed screens and the keyboard until the thread list shows. */

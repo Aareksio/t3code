@@ -173,10 +173,11 @@ async function captureFlow(
     await simulator.home(THREAD_LIST);
     await frame("Start");
     for (const step of flow.steps) {
-      await simulator.perform(step, targets);
+      const tapped = await simulator.perform(step, targets);
+      // The label actually tapped, so the filmstrip names what this build shows.
       const action =
         "tap" in step
-          ? `Tap ${step.name ?? step.tap.replaceAll(/[\^$]/g, "")}`
+          ? `Tap ${tapped}`
           : "type" in step
             ? `Type "${step.type}"`
             : "focus" in step

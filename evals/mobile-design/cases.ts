@@ -1,8 +1,7 @@
 /**
  * Steps: `link` opens `t3code://<path>`, where `{thread:<id>}` becomes `<environmentId>/<threadId>`
  * for a seeded or live fixture thread; `tap` presses the first element whose accessibility label
- * matches the regex, shown in flows as its `name` when it has one; `focus: "composer"` taps the
- * unlabelled composer.
+ * matches the regex; `focus: "composer"` taps the unlabelled composer.
  */
 
 export const AXES = [
@@ -56,7 +55,7 @@ export const SIMULATORS = {
 
 export type StepAction =
   | { readonly link: string }
-  | { readonly tap: string; readonly name?: string }
+  | { readonly tap: string }
   | { readonly type: string }
   | { readonly scroll: "up" | "down" }
   | { readonly focus: "composer" }
@@ -290,12 +289,12 @@ export const FLOWS = [
     title: "Start a thread in a chosen project and machine",
     source: REQUEST,
     steps: [
-      { tap: "^(New chat|New thread)$", name: "New thread" },
+      { tap: "^(New chat|New thread)$" },
       { tap: "^T3 Code$" },
       { tap: "^React$" },
       { tap: "^Choose environment" },
       // Pick whichever machine the picker offers; when it is not the project's, the frames show it.
-      { tap: "^(Suspense Station|Moonbase Terminal|Kernel Cabin)", name: "the offered machine" },
+      { tap: "^(Suspense Station|Moonbase Terminal|Kernel Cabin)" },
       { focus: "composer" },
       { type: "Add a loading skeleton to the profile page" },
       { tap: "^Send$" },
@@ -319,8 +318,8 @@ export const FLOWS = [
     source: REQUEST,
     steps: [
       { tap: "^Make remote coding feel local" },
-      { tap: "^(Git|Panel|Toggle panel)$", name: "Git or Panel" },
-      { tap: "^(Review changes|Diff$)", name: "Review changes or Diff" },
+      { tap: "^(Git|Panel|Toggle panel)$" },
+      { tap: "^(Review changes|Diff$)" },
     ],
   },
   {
@@ -333,11 +332,7 @@ export const FLOWS = [
     id: "find-old-thread",
     title: "Find an old thread",
     source: REQUEST,
-    steps: [
-      { tap: "^(Search|Search threads)$", name: "Search" },
-      { type: "OOM" },
-      { tap: "OOM killer" },
-    ],
+    steps: [{ tap: "^(Search|Search threads)$" }, { type: "OOM" }, { tap: "OOM killer" }],
   },
   {
     id: "change-model",
@@ -347,7 +342,7 @@ export const FLOWS = [
       { tap: "^Show a reconnect banner$" },
       { tap: "^Model and reasoning settings" },
       { tap: "^GPT-5.3 Codex" },
-      { tap: "^Save thread settings$", name: "Save" },
+      { tap: "^Save thread settings$" },
     ],
   },
 ] as const satisfies ReadonlyArray<Flow>;

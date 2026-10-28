@@ -229,6 +229,15 @@ describe("CursorAdapterV2", () => {
       failure: { class: "usage_limit", message: "Usage limit reached" },
     },
     {
+      reason: "the SDK's detailed plan usage limit code",
+      wait: Effect.succeed({
+        id: "native-cursor-run",
+        status: "error" as const,
+        error: { message: "You've hit your usage limit", code: "PRO_USER_USAGE_LIMIT" },
+      }),
+      failure: { class: "usage_limit", message: "You've hit your usage limit" },
+    },
+    {
       reason: "an unrelated SDK transport error",
       wait: Effect.fail(
         new CursorAgentSdk.CursorAgentSdkRunnerError({

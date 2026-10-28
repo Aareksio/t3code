@@ -280,6 +280,34 @@ export function DeviceSourcesSettings(props: {
       "Simlock host not removed everywhere",
     );
 
+  const [testing, setTesting] = useState<ReadonlySet<string>>(new Set());
+  const testSsh = async (host: SshDeviceHostConfig) => {
+    setTesting((current) => new Set(current).add(host.id));
+    const checked = await testConnection(host).finally(() =>
+      setTesting((current) => {
+        const next = new Set(current);
+        next.delete(host.id);
+        return next;
+      }),
+    );
+    if (!checked) return;
+    const failed = targets.filter((target) => checked[target.environmentId]?.status === "failed");
+    toastManager.add({
+      type: failed.length ? "error" : "success",
+      title: failed.length
+        ? `${host.label}: ${failed.length} of ${targets.length} environments failed`
+        : `${host.label}: connection checks passed`,
+      description: failed.length
+        ? failed
+            .map((target) => {
+              const result = checked[target.environmentId];
+              return `${target.label}: ${result?.status === "failed" ? result.error : "failed"}`;
+            })
+            .join("\n")
+        : "Connected or already available locally on each selected environment.",
+    });
+  };
+
   const retry = (environmentId: EnvironmentId, hostId: string) =>
     void list({ environmentId, input: { retryHostId: hostId } });
 
@@ -374,7 +402,9 @@ export function DeviceSourcesSettings(props: {
             label: member.label,
             status: { tone: "none", label: "Not added" },
           };
-        const status = hostStatus(member.state, held.host.id);
+        const status: SourceStatus = testing.has(host.id)
+          ? { tone: "pending", label: "Testing connection" }
+          : hostStatus(member.state, held.host.id);
         return {
           environmentId: member.environmentId,
           label: member.label,
@@ -391,7 +421,7 @@ export function DeviceSourcesSettings(props: {
       actions: rowActions(
         () => setEditing({ kind: "ssh", host, original: host }),
         () => void saveSsh(host, true),
-        <MenuItem onClick={() => void testConnection(host)}>Test connection</MenuItem>,
+        <MenuItem onClick={() => void testSsh(host)}>Test connection</MenuItem>,
       ),
     });
   }

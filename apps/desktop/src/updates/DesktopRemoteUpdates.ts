@@ -223,22 +223,29 @@ export const listen: Effect.Effect<
         // Set once this request prepares its build; otherwise a track switch is undone.
         let keepsTrack = request.channel === undefined;
         if (request.channel !== undefined) {
-          const switched = yield* setChannelWhenIdle(request.channel).pipe(
-            Effect.as(true),
-            Effect.catch((error) =>
-              updates.getState.pipe(
-                Effect.flatMap((state) =>
-                  publishReport(
-                    state,
-                    { outcome: "failed", reason: error.message },
-                    request.requestId,
+          const switched = yield* Effect.raceFirst(
+            setChannelWhenIdle(request.channel).pipe(
+              Effect.as("switched" as const),
+              Effect.catch((error) =>
+                updates.getState.pipe(
+                  Effect.flatMap((state) =>
+                    publishReport(
+                      state,
+                      { outcome: "failed", reason: error.message },
+                      request.requestId,
+                    ),
                   ),
+                  Effect.as("failed" as const),
                 ),
-                Effect.as(false),
               ),
             ),
+            // A cancel during the switch's own feed check ends the request now, not after it.
+            Deferred.await(cancellation).pipe(Effect.as("cancelled" as const)),
           );
-          if (!switched) return;
+          if (switched === "failed") return;
+          if (switched === "cancelled") {
+            return previousChannel !== request.channel ? previousChannel : undefined;
+          }
         }
         const { latest, changes } = yield* updates.subscribe;
         const disabledReason = Option.getOrNull(yield* updates.disabledReason);

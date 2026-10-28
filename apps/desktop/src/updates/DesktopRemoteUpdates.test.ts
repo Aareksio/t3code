@@ -599,6 +599,38 @@ describe("DesktopRemoteUpdates", () => {
     );
   });
 
+  it.effect("cancels a track switch while its own feed check is still running", () => {
+    const releaseCheck = Deferred.makeUnsafe<void>();
+    const harness = makeHarness({
+      beforeSetUpdateChannel: Effect.void,
+      checkForUpdates: Deferred.await(releaseCheck),
+    });
+
+    return runRemoteUpdatesTest(harness, ({ requests, cancellations }) =>
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* Queue.offer(requests, {
+          ...request("req-switch-cancel"),
+          channel: "nightly",
+          targetVersion: "1.2.4-nightly.20261027.1",
+        });
+        yield* settle;
+        assert.equal((yield* updates.getState).channel, "nightly");
+
+        yield* Queue.offer(cancellations, {
+          version: 1,
+          type: "cancelDesktopUpdate",
+          requestId: "req-switch-cancel",
+        });
+        yield* settle;
+
+        // Restored without waiting for the switch's feed check to finish.
+        assert.equal((yield* updates.getState).channel, "latest");
+        yield* Deferred.succeed(releaseCheck, undefined);
+      }),
+    );
+  });
+
   it.effect("cancels an active preparation so the next request can run", () => {
     const releaseCheck = Deferred.makeUnsafe<void>();
     const harness = makeHarness({ checkForUpdates: Deferred.await(releaseCheck) });

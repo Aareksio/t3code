@@ -811,6 +811,11 @@ describe("DesktopUpdates", () => {
 
         assert.equal((yield* updates.getState).channel, "latest");
         assert.deepEqual(harness.checkAllowedDowngrade, [false]);
+        // Semver ranks Stable 1.2.4 above this Nightly, but a Nightly built before the release's
+        // version bump can hold migrations 1.2.4 lacks. Crossing needs a guarded switch.
+        harness.emit("update-available", { version: "1.2.4" });
+        yield* flushCallbacks;
+        assert.isNull((yield* updates.getState).availableVersion);
       }),
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });

@@ -361,15 +361,18 @@ export const make = Effect.gen(function* () {
   const updaterConfiguredRef = yield* Ref.make(false);
   const lastLoggedDownloadMilestoneRef = yield* Ref.make(-1);
   const notAppliedVersionRef = yield* Ref.make(Option.none<string>());
-  // The release a track switch's database check cleared. While set, nothing older is offered, so a
-  // refused switch cannot leave an unchecked build for the pill or a plain update to install.
+  // The release a track switch's database check cleared. A build crosses to another track only
+  // through such a switch, and never below that release: version order alone cannot tell whether
+  // a Stable knows a Nightly's migrations.
   const releaseFloorRef = yield* Ref.make(Option.none<string>());
   const offerable = (version: string, state: DesktopUpdateState) =>
     Ref.get(releaseFloorRef).pipe(
       Effect.map(
         (floor) =>
           desktopUpdateChannelOf(version) === state.channel &&
-          (Option.isNone(floor) || compareSemverVersions(version, floor.value) >= 0),
+          (Option.isSome(floor)
+            ? compareSemverVersions(version, floor.value) >= 0
+            : desktopUpdateChannelOf(environment.appVersion) === state.channel),
       ),
     );
   const updateStateRef = yield* Ref.make<DesktopUpdateState>(
@@ -473,18 +476,15 @@ export const make = Effect.gen(function* () {
   ) {
     yield* Effect.annotateCurrentSpan({ channel });
     const allowsPrerelease = channel === "nightly";
-    // An older Nightly can lack migrations a newer one ran, so a Nightly build never downgrades
-    // unguarded. Other builds may need to step down to join Nightly.
-    const allowsDowngrade =
-      allowsPrerelease && desktopUpdateChannelOf(environment.appVersion) !== "nightly";
     yield* electronUpdater.setChannel(channel);
     yield* electronUpdater.setAllowPrerelease(allowsPrerelease);
-    yield* electronUpdater.setAllowDowngrade(allowsDowngrade);
+    // An older build can lack migrations this one ran. Only a guarded track switch's own check
+    // may offer one.
+    yield* electronUpdater.setAllowDowngrade(false);
     yield* electronUpdater.setFullChangelog(allowsPrerelease);
     yield* logUpdaterInfo("using update channel", {
       channel,
       allowPrerelease: allowsPrerelease,
-      allowDowngrade: allowsDowngrade,
       fullChangelog: allowsPrerelease,
     });
   });

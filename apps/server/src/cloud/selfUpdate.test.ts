@@ -314,25 +314,26 @@ it.layer(NodeServices.layer)("pruning runtimes on start", (it) => {
   );
 });
 
-it("a host leaves Nightly only for a release that knows its whole database", () => {
-  const leave = (targetDatabaseMigration: number | undefined, databaseMigration = 72) =>
-    ServerSelfUpdate.nightlyLeaveBlockReason({
-      serverVersion: "0.1.4-nightly.20261027.3796",
-      targetVersion: "0.1.4",
+it("a host crosses tracks only to a release that knows its whole database", () => {
+  const cross = (
+    serverVersion: string,
+    targetVersion: string,
+    targetDatabaseMigration: number | undefined,
+    databaseMigration = 72,
+  ) =>
+    ServerSelfUpdate.trackSwitchBlockReason({
+      serverVersion,
+      targetVersion,
       targetDatabaseMigration,
       databaseMigration,
     });
+  const nightly = "0.1.4-nightly.20261027.3796";
 
-  expect(leave(72)).toBeNull();
+  expect(cross(nightly, "0.1.4", 72)).toBeNull();
   // Another client moved this host to a newer Nightly after the switch was planned.
-  expect(leave(72, 73)).toContain("does not support yet");
-  expect(leave(undefined)).toContain("Cannot confirm");
-  expect(
-    ServerSelfUpdate.nightlyLeaveBlockReason({
-      serverVersion: "0.1.3",
-      targetVersion: "0.1.4-nightly.20261027.3796",
-      targetDatabaseMigration: undefined,
-      databaseMigration: 72,
-    }),
-  ).toBeNull();
+  expect(cross(nightly, "0.1.4", 72, 73)).toContain("does not support yet");
+  expect(cross(nightly, "0.1.4", undefined)).toContain("Cannot confirm");
+  // A Stable tag can carry a migration the latest Nightly lacks.
+  expect(cross("0.1.4", nightly, 72, 73)).toContain("does not support yet");
+  expect(cross("0.1.3", "0.1.4", undefined)).toBeNull();
 });

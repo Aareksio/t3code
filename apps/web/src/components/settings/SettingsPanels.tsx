@@ -338,7 +338,7 @@ function AboutVersionSection() {
                 </Button>
               </>
             ) : (
-              "Switches this app and every connected machine. Leaving Nightly is blocked until Stable supports its database changes."
+              "Switches this app and every connected machine whose database the target release supports."
             )
           }
           control={

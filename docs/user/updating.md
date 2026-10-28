@@ -47,10 +47,10 @@ A background service cannot move to an older release remotely. When Stable is
 older than its Nightly, run `t3 update --channel stable --allow-downgrade` on
 that machine.
 
-Leaving Nightly is blocked for a machine whose database already has changes the
-latest Stable release does not support, or when T3 Code cannot confirm that it
-does. The dialog says why: update a machine on Nightly first when its release is
-too old to check, or stay on Nightly until a Stable release includes the
+A switch is blocked for a machine whose database already has changes the
+target release does not support, or when T3 Code cannot confirm that it does.
+The dialog says why: update a machine on its current track first when its
+release is too old to check, or wait until the target track includes the
 changes. A Mac running the desktop app must switch on that Mac.
 
 Each machine keeps the new track even if its switch did not finish, but it

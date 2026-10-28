@@ -95,25 +95,22 @@ export const pruneRuntimesOnStart = Effect.fn("cloud.server_self_update.prune_on
 );
 
 /** The client checks this when planning; the host checks again because its database may have
- * moved on since (another client updated it). Leaving Nightly needs the target release to know
- * every migration this database holds. */
-export function nightlyLeaveBlockReason(input: {
+ * moved on since (another client updated it). Stable and Nightly each build their own commits,
+ * so crossing tracks needs the target release to know every migration this database holds. */
+export function trackSwitchBlockReason(input: {
   readonly serverVersion: string;
   readonly targetVersion: string;
   readonly targetDatabaseMigration: number | undefined;
   readonly databaseMigration: number;
 }): string | null {
-  if (
-    cliReleaseChannelOf(input.serverVersion) !== "nightly" ||
-    cliReleaseChannelOf(input.targetVersion) !== "stable"
-  ) {
-    return null;
-  }
+  const from = cliReleaseChannelOf(input.serverVersion);
+  const to = cliReleaseChannelOf(input.targetVersion);
+  if (from === to || from === "preview" || to === "preview") return null;
   if (input.targetDatabaseMigration === undefined) {
-    return `Cannot confirm this database works with t3@${input.targetVersion}; stay on Nightly.`;
+    return `Cannot confirm this database works with t3@${input.targetVersion}; it stays on this release.`;
   }
   return input.targetDatabaseMigration < input.databaseMigration
-    ? `This database has changes t3@${input.targetVersion} does not support yet; stay on Nightly until Stable has them.`
+    ? `This database has changes t3@${input.targetVersion} does not support yet; it stays on this release.`
     : null;
 }
 
@@ -143,8 +140,8 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
       ? new ServerSelfUpdateError({ reason })
       : new ServerSelfUpdateError({ reason, cause });
 
-  const leavesNightlyUnsafely = (input: ServerSelfUpdateInput) =>
-    nightlyLeaveBlockReason({
+  const crossesTrackUnsafely = (input: ServerSelfUpdateInput) =>
+    trackSwitchBlockReason({
       serverVersion: packageJson.version,
       targetVersion: input.targetVersion,
       targetDatabaseMigration: input.targetDatabaseMigration,
@@ -154,7 +151,7 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
   const update: ServerSelfUpdate["Service"]["update"] = Effect.fn(
     "cloud.server_self_update.update",
   )(function* (input, reportProgress = () => Effect.void, onHandoffAccepted = () => Effect.void) {
-    const unsafeDowngrade = leavesNightlyUnsafely(input);
+    const unsafeDowngrade = crossesTrackUnsafely(input);
     if (capability === "desktop-managed") {
       if (input.channel !== undefined && unsafeDowngrade !== null) {
         return yield* failWith(unsafeDowngrade);

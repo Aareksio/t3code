@@ -134,26 +134,27 @@ export interface ChannelSwitchRelease {
 export const channelSwitchLabel = (channel: DesktopUpdateChannel) =>
   channel === "nightly" ? "Nightly" : "Stable";
 
-/** Nightly databases can hold migrations that stable does not have yet. Leaving nightly needs
- * proof that the target release knows every migration the host's database holds. */
-export const leavesNightly = (fromVersion: string, release: ChannelSwitchRelease) =>
-  release.channel === "latest" && cliReleaseChannelOf(fromVersion) === "nightly";
+/** Stable and Nightly each build their own commits, so either can hold migrations the other lacks.
+ * Crossing tracks needs proof that the target release knows every migration the database holds. */
+export const crossesTrack = (fromVersion: string, release: ChannelSwitchRelease) =>
+  desktopUpdateChannelOf(fromVersion) !== release.channel;
 
 export function channelSwitchBlockReason(
   fromVersion: string,
   release: ChannelSwitchRelease,
   currentMigration: number | undefined,
 ): string | null {
-  if (!leavesNightly(fromVersion, release)) return null;
+  if (!crossesTrack(fromVersion, release)) return null;
+  const from = channelSwitchLabel(desktopUpdateChannelOf(fromVersion));
   // Servers and releases from before this check report no migration number.
   if (currentMigration === undefined) {
-    return `its server predates database checks; update it on Nightly first`;
+    return `its server predates database checks; update it on ${from} first`;
   }
   if (release.databaseMigration === undefined) {
-    return `${release.version} predates database checks; wait for a newer Stable release`;
+    return `${release.version} predates database checks; wait for a newer ${channelSwitchLabel(release.channel)} release`;
   }
   return currentMigration > release.databaseMigration
-    ? `its database has changes ${release.version} does not support yet; stay on Nightly until Stable has them`
+    ? `its database has changes ${release.version} does not support yet; stay on ${from} until ${channelSwitchLabel(release.channel)} has them`
     : null;
 }
 

@@ -2,7 +2,6 @@ import { EnvironmentId, type ServerSelfUpdateCapability } from "@t3tools/contrac
 import { describe, expect, it } from "vite-plus/test";
 
 import {
-  channelSwitchBlockReason,
   collectChannelSwitchTargets,
   collectRestartingMachines,
   collectServerUpdateTargets,
@@ -154,11 +153,13 @@ describe("collectChannelSwitchTargets", () => {
     ]);
   });
 
-  it("moves stable hosts to nightly without a database check", () => {
-    const nightly = { channel: "nightly" as const, version: NIGHTLY, databaseMigration: undefined };
+  it("moves stable hosts to nightly only when nightly knows their database", () => {
+    const nightly = { channel: "nightly" as const, version: NIGHTLY, databaseMigration: 72 };
     const { targets, skipped } = collectChannelSwitchTargets(
       [
-        machine("service", "0.1.2", "boot-service"),
+        host(machine("service", "0.1.2", "boot-service"), 70),
+        // A Stable tag built a migration the latest Nightly does not have yet.
+        host(machine("ahead", "0.1.3", "boot-service"), 73),
         machine("old-desktop", "0.1.2", "desktop-managed", {
           serverConfig: {
             ...machine("old-desktop", "0.1.2", "desktop-managed").serverConfig!,
@@ -177,9 +178,12 @@ describe("collectChannelSwitchTargets", () => {
       ["service", NIGHTLY],
     ]);
     expect(skipped.map((entry) => [entry.label, entry.reason])).toEqual([
+      [
+        "ahead",
+        `its database has changes ${NIGHTLY} does not support yet; stay on Stable until Nightly has them`,
+      ],
       ["old-desktop", "needs a newer desktop app"],
     ]);
-    expect(channelSwitchBlockReason("0.1.2", nightly, undefined)).toBeNull();
   });
 });
 

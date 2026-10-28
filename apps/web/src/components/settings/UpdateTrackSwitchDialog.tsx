@@ -15,7 +15,7 @@ import { UpdateEverythingDialog } from "../sidebar/UpdateEverythingDialog";
 import {
   channelSwitchBlockReason,
   channelSwitchLabel,
-  leavesNightly,
+  crossesTrack,
   type ChannelSwitchRelease,
 } from "../sidebar/updateEverything.logic";
 import { isHostedByThisApp, useUpdateEverything } from "../sidebar/useUpdateEverything";
@@ -86,7 +86,7 @@ function SwitchPlan({
   const hosted = environments.filter(isHostedByThisApp);
   const hostedConfigs = hosted.map((environment) => environment.serverConfig);
   const localBlocked =
-    leavesNightly(APP_VERSION, release) &&
+    crossesTrack(APP_VERSION, release) &&
     (hostedConfigs.length === 0 || hostedConfigs.some((config) => config === null))
       ? "its server is not connected, so its database cannot be checked"
       : (hostedConfigs

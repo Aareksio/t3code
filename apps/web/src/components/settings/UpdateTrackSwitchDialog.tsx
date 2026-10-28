@@ -15,6 +15,7 @@ import { UpdateEverythingDialog } from "../sidebar/UpdateEverythingDialog";
 import {
   channelSwitchBlockReason,
   channelSwitchLabel,
+  leavesNightly,
   type ChannelSwitchRelease,
 } from "../sidebar/updateEverything.logic";
 import { isHostedByThisApp, useUpdateEverything } from "../sidebar/useUpdateEverything";
@@ -83,12 +84,16 @@ function SwitchPlan({
   const label = channelSwitchLabel(release.channel);
   // This app's reinstall restarts every server it hosts, so each of their databases must allow it.
   const hosted = environments.filter(isHostedByThisApp);
+  const hostedConfigs = hosted.map((environment) => environment.serverConfig);
   const localBlocked =
-    (hosted.length === 0 ? [undefined] : hosted.map((environment) => environment.serverConfig))
-      .map((config) =>
-        channelSwitchBlockReason(APP_VERSION, release, config?.environment.databaseMigration),
-      )
-      .find((reason) => reason !== null) ?? null;
+    leavesNightly(APP_VERSION, release) &&
+    (hostedConfigs.length === 0 || hostedConfigs.some((config) => config === null))
+      ? "its server is not connected, so its database cannot be checked"
+      : (hostedConfigs
+          .map((config) =>
+            channelSwitchBlockReason(APP_VERSION, release, config?.environment.databaseMigration),
+          )
+          .find((reason) => reason !== null) ?? null);
 
   const run = async () => {
     const bridge = window.desktopBridge;

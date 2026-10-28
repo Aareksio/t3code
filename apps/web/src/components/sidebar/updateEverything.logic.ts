@@ -136,12 +136,15 @@ export const channelSwitchLabel = (channel: DesktopUpdateChannel) =>
 
 /** Nightly databases can hold migrations that stable does not have yet. Leaving nightly needs
  * proof that the target release knows every migration the host's database holds. */
+export const leavesNightly = (fromVersion: string, release: ChannelSwitchRelease) =>
+  release.channel === "latest" && cliReleaseChannelOf(fromVersion) === "nightly";
+
 export function channelSwitchBlockReason(
   fromVersion: string,
   release: ChannelSwitchRelease,
   currentMigration: number | undefined,
 ): string | null {
-  if (release.channel === "nightly" || cliReleaseChannelOf(fromVersion) !== "nightly") return null;
+  if (!leavesNightly(fromVersion, release)) return null;
   // Servers and releases from before this check report no migration number.
   if (currentMigration === undefined) {
     return `its server predates database checks; update it on Nightly first`;

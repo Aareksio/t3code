@@ -201,10 +201,8 @@ describe("DesktopRemoteUpdates", () => {
           targetVersion: "1.2.3",
         });
         yield* settle;
-        // Answers the track change's check, then the request's own check.
-        harness.emit("update-not-available");
-        yield* settle;
-        harness.emit("update-not-available");
+        // Even with a newer build on the feed, the host only saves its track.
+        harness.emit("update-available", { version: "1.2.4" });
         yield* settle;
 
         assert.deepEqual(

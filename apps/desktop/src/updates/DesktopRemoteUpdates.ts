@@ -199,6 +199,13 @@ export const listen: Effect.Effect<
             Deferred.await(cancellation).pipe(Effect.as(false)),
           );
           if (!switched) return;
+          // A host already running the target only needed its track saved; installing a newer
+          // build here would restart it without the dialog having said so.
+          const state = yield* updates.getState;
+          if (request.targetVersion === state.currentVersion) {
+            yield* publishReport(state, { outcome: "up-to-date" }, request.requestId);
+            return;
+          }
         }
         const { latest, changes } = yield* updates.subscribe;
         const disabledReason = Option.getOrNull(yield* updates.disabledReason);

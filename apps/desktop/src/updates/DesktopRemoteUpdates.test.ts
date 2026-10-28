@@ -215,6 +215,39 @@ describe("DesktopRemoteUpdates", () => {
     );
   });
 
+  it.effect("drops a retained download below the switch's checked release", () => {
+    const harness = makeHarness({ beforeSetUpdateChannel: Effect.void });
+
+    return runRemoteUpdatesTest(harness, ({ reports, requests }) =>
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        // Downloaded earlier on this Stable host, before the switch checked 1.2.5.
+        harness.emit("update-downloaded", { version: "1.2.4" });
+        yield* settle;
+        assert.equal((yield* updates.getState).downloadedVersion, "1.2.4");
+
+        yield* Queue.offer(requests, {
+          ...request("req-floor"),
+          channel: "latest",
+          targetVersion: "1.2.5",
+        });
+        yield* settle;
+        harness.emit("update-available", { version: "1.2.5" });
+        yield* settle;
+        harness.emit("update-downloaded", { version: "1.2.5" });
+        yield* settle;
+
+        assert.deepEqual(
+          terminalReports(reports).map((report) => [
+            report.outcome,
+            report.state.downloadedVersion,
+          ]),
+          [["ready-to-install", "1.2.5"]],
+        );
+      }),
+    );
+  });
+
   it.effect("accepts a newer build than the checked release on the requested track", () => {
     const harness = makeHarness({ beforeSetUpdateChannel: Effect.void });
 

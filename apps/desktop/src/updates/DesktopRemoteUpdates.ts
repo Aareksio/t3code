@@ -15,6 +15,7 @@ import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import * as DesktopObservability from "../app/DesktopObservability.ts";
+import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
 import * as DesktopTelemetryPublisher from "../telemetry/DesktopTelemetryPublisher.ts";
 import * as DesktopUpdates from "./DesktopUpdates.ts";
 import {
@@ -45,9 +46,13 @@ type CommitClaim =
 export const listen: Effect.Effect<
   void,
   never,
-  DesktopUpdates.DesktopUpdates | DesktopTelemetryPublisher.DesktopTelemetryPublisher | Scope.Scope
+  | DesktopUpdates.DesktopUpdates
+  | DesktopTelemetryPublisher.DesktopTelemetryPublisher
+  | DesktopBackendPool.DesktopBackendPool
+  | Scope.Scope
 > = Effect.gen(function* () {
   const updates = yield* DesktopUpdates.DesktopUpdates;
+  const backends = yield* DesktopBackendPool.DesktopBackendPool;
   const publisher = yield* DesktopTelemetryPublisher.DesktopTelemetryPublisher;
   const activeRequestIdRef = yield* Ref.make(Option.none<string>());
   const requestControlRef = yield* Ref.make<{
@@ -180,6 +185,24 @@ export const listen: Effect.Effect<
         // The saved track is the user's intent and stays even if this request fails: a track saved
         // toward Stable never offers an older build outside a guarded switch.
         if (request.channel !== undefined) {
+          // A reinstall restarts every backend, but the requesting server checked only its own
+          // database. A WSL backend keeps its own, so cross tracks only where all can be checked.
+          const current = yield* updates.getState;
+          if (
+            desktopUpdateChannelOf(current.currentVersion) !== request.channel &&
+            (yield* backends.list).length > 1
+          ) {
+            yield* publishReport(
+              current,
+              {
+                outcome: "failed",
+                reason:
+                  "This desktop app also runs WSL backends, whose databases a remote switch cannot check. Switch it on that machine.",
+              },
+              request.requestId,
+            );
+            return;
+          }
           const switched = yield* Effect.raceFirst(
             updates.setChannel(request.channel, { minimumVersion: request.targetVersion }).pipe(
               Effect.as(true),

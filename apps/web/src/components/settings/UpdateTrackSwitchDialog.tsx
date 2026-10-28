@@ -13,9 +13,8 @@ import { npmReleaseAtom } from "~/state/npmRelease";
 import { downloadLocalUpdate, installLocalUpdate } from "../sidebar/SidebarUpdatePill";
 import { UpdateEverythingDialog } from "../sidebar/UpdateEverythingDialog";
 import {
-  channelSwitchBlockReason,
   channelSwitchLabel,
-  crossesTrack,
+  localSwitchBlockReason,
   type ChannelSwitchRelease,
 } from "../sidebar/updateEverything.logic";
 import { isHostedByThisApp, useUpdateEverything } from "../sidebar/useUpdateEverything";
@@ -83,17 +82,14 @@ function SwitchPlan({
   const everything = useUpdateEverything(switchesLocal ? release.version : null, release);
   const label = channelSwitchLabel(release.channel);
   // This app's reinstall restarts every server it hosts, so each of their databases must allow it.
-  const hosted = environments.filter(isHostedByThisApp);
-  const hostedConfigs = hosted.map((environment) => environment.serverConfig);
-  const localBlocked =
-    crossesTrack(APP_VERSION, release) &&
-    (hostedConfigs.length === 0 || hostedConfigs.some((config) => config === null))
-      ? "its server is not connected, so its database cannot be checked"
-      : (hostedConfigs
-          .map((config) =>
-            channelSwitchBlockReason(APP_VERSION, release, config?.environment.databaseMigration),
-          )
-          .find((reason) => reason !== null) ?? null);
+  const localBlocked = localSwitchBlockReason(
+    APP_VERSION,
+    release,
+    environments.filter(isHostedByThisApp).map((environment) => ({
+      connected: environment.connection.phase === "connected",
+      databaseMigration: environment.serverConfig?.environment.databaseMigration,
+    })),
+  );
 
   const run = async () => {
     const bridge = window.desktopBridge;

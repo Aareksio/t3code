@@ -136,10 +136,10 @@ export const channelSwitchLabel = (channel: DesktopUpdateChannel) =>
 
 /** Stable and Nightly each build their own commits, so either can hold migrations the other lacks.
  * Crossing tracks needs proof that the target release knows every migration the database holds. */
-export const crossesTrack = (fromVersion: string, release: ChannelSwitchRelease) =>
+const crossesTrack = (fromVersion: string, release: ChannelSwitchRelease) =>
   desktopUpdateChannelOf(fromVersion) !== release.channel;
 
-export function channelSwitchBlockReason(
+function channelSwitchBlockReason(
   fromVersion: string,
   release: ChannelSwitchRelease,
   currentMigration: number | undefined,
@@ -156,6 +156,27 @@ export function channelSwitchBlockReason(
   return currentMigration > release.databaseMigration
     ? `its database has changes ${release.version} does not support yet; stay on ${from} until ${channelSwitchLabel(release.channel)} has them`
     : null;
+}
+
+/** This app's reinstall restarts every server it hosts, so each of their databases must allow the
+ * switch. A cached config can outlive its connection, so only a connected server's head counts. */
+export function localSwitchBlockReason(
+  appVersion: string,
+  release: ChannelSwitchRelease,
+  hosted: ReadonlyArray<{
+    readonly connected: boolean;
+    readonly databaseMigration: number | undefined;
+  }>,
+): string | null {
+  if (!crossesTrack(appVersion, release)) return null;
+  if (hosted.length === 0 || hosted.some((server) => !server.connected)) {
+    return "its server is not connected, so its database cannot be checked";
+  }
+  return (
+    hosted
+      .map((server) => channelSwitchBlockReason(appVersion, release, server.databaseMigration))
+      .find((reason) => reason !== null) ?? null
+  );
 }
 
 /** Servers move to the release; desktop-managed hosts reinstall their app on its track. A desktop

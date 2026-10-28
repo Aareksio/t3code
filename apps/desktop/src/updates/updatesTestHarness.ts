@@ -38,6 +38,8 @@ export interface UpdatesHarnessOptions {
   readonly appVersion?: string;
   /** Starts from in-memory settings with this track saved, as after a restart. */
   readonly savedChannel?: DesktopAppSettings.DesktopSettings["updateChannel"];
+  /** Adds a WSL backend beside the primary, as on a Windows host with WSL enabled. */
+  readonly wslBackend?: boolean;
 }
 
 export function makeHarness(options: UpdatesHarnessOptions = {}) {
@@ -154,7 +156,17 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     waitForReady: () => Effect.succeed(true),
   };
   const layerBackend = DesktopBackendPool.layerTest(
-    options.backendInstances ?? [stubBackendInstance],
+    options.backendInstances ??
+      (options.wslBackend
+        ? [
+            stubBackendInstance,
+            {
+              ...stubBackendInstance,
+              id: DesktopBackendPool.BackendInstanceId("wsl:Ubuntu"),
+              label: Effect.succeed("Ubuntu"),
+            },
+          ]
+        : [stubBackendInstance]),
   );
 
   const layerEnvironment = DesktopEnvironment.layer({

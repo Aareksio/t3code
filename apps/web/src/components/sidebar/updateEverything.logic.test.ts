@@ -4,6 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   collectChannelSwitchTargets,
   collectRestartingMachines,
+  localSwitchBlockReason,
   collectServerUpdateTargets,
   describeUpdateCapsule,
   describeUpdateEverything,
@@ -184,6 +185,29 @@ describe("collectChannelSwitchTargets", () => {
       ],
       ["old-desktop", "needs a newer desktop app"],
     ]);
+  });
+});
+
+describe("localSwitchBlockReason", () => {
+  it("checks every server this app hosts, and only while connected", () => {
+    const stable = { channel: "latest" as const, version: "0.1.3", databaseMigration: 69 };
+    const nightly = "0.1.4-nightly.20261027.3796";
+
+    expect(
+      localSwitchBlockReason(nightly, stable, [{ connected: true, databaseMigration: 69 }]),
+    ).toBeNull();
+    // A WSL server's newer migration blocks the reinstall that would restart it.
+    expect(
+      localSwitchBlockReason(nightly, stable, [
+        { connected: true, databaseMigration: 69 },
+        { connected: true, databaseMigration: 72 },
+      ]),
+    ).toContain("does not support yet");
+    // A cached head from a disconnected server proves nothing.
+    expect(
+      localSwitchBlockReason(nightly, stable, [{ connected: false, databaseMigration: 69 }]),
+    ).toBe("its server is not connected, so its database cannot be checked");
+    expect(localSwitchBlockReason("0.1.3", stable, [])).toBeNull();
   });
 });
 

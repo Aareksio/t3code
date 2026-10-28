@@ -176,7 +176,7 @@ export const SCENES = [
     id: "new-thread",
     title: "New thread, project chosen",
     source: REQUEST,
-    steps: [{ link: "new" }, { tap: "^T3 Code$" }],
+    steps: [{ link: "new" }, { tap: "^T3 Code$", skipIf: "^Project: " }],
     // The web app has no new-thread route; its home page is the new-thread screen.
     desktop: { path: "/" },
   },
@@ -297,12 +297,13 @@ export const FLOWS = [
     source: REQUEST,
     steps: [
       { tap: "^(New chat|New thread)$" },
-      // New thread can open straight onto the project picker.
-      { tap: "^T3 Code$", skipIf: "^Choose project$" },
+      // New thread can open straight onto the project picker, or a draft with one project chip.
+      { tap: ["^Project: ", "^T3 Code$"], skipIf: "^Choose project$" },
       { tap: "^React$" },
-      { tap: "^Choose environment" },
+      // A build whose project chip also names the machine has no separate machine step.
+      { tap: "^Choose environment", skipIf: "^Project: " },
       // Pick whichever machine the picker offers; when it is not the project's, the frames show it.
-      { tap: "^(Suspense Station|Moonbase Terminal|Kernel Cabin)" },
+      { tap: "^(Suspense Station|Moonbase Terminal|Kernel Cabin)", skipIf: "^Project: " },
       { focus: "composer" },
       { type: "Add a loading skeleton to the profile page" },
       { tap: "^Send$" },
@@ -330,9 +331,9 @@ export const FLOWS = [
       { tap: ["^Changes [+]", "^(Git|Panel|Toggle panel)$", "^More$"] },
       {
         tap: ["^Changes [+]", "^(Review changes|Diff$)", "^(Panel|Toggle panel)$"],
-        skipIf: "^Select diff$",
+        skipIf: "^(Select diff|Open full review)$",
       },
-      { tap: "^Diff$", optional: true, skipIf: "^Select diff$" },
+      { tap: "^Diff$", optional: true, skipIf: "^(Select diff|Open full review)$" },
     ],
   },
   {

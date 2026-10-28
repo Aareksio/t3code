@@ -135,16 +135,16 @@ export const channelSwitchLabel = (channel: DesktopUpdateChannel) =>
   channel === "nightly" ? "Nightly" : "Stable";
 
 /** Nightly databases can hold migrations that stable does not have yet. Leaving nightly needs
- * proof that the target release knows every migration the host's current release ran. */
+ * proof that the target release knows every migration the host's database holds. */
 export function channelSwitchBlockReason(
   fromVersion: string,
   release: ChannelSwitchRelease,
   currentMigration: number | undefined,
 ): string | null {
   if (release.channel === "nightly" || cliReleaseChannelOf(fromVersion) !== "nightly") return null;
-  // Releases from before this check carry no migration number.
+  // Servers and releases from before this check report no migration number.
   if (currentMigration === undefined) {
-    return `its release predates database checks; update it on Nightly first`;
+    return `its server predates database checks; update it on Nightly first`;
   }
   if (release.databaseMigration === undefined) {
     return `${release.version} predates database checks; wait for a newer Stable release`;
@@ -154,47 +154,73 @@ export function channelSwitchBlockReason(
     : null;
 }
 
-/** Servers move to the release; desktop-managed hosts reinstall their app on its track. */
+/** Servers move to the release; desktop-managed hosts reinstall their app on its track. A desktop
+ * host already current gets a track-only request, since its saved track may still differ. */
 export function collectChannelSwitchTargets(
   machines: ReadonlyArray<UpdateEverythingMachine>,
   release: ChannelSwitchRelease,
-  migrationOf: (version: string) => number | undefined,
 ): { readonly targets: ServerUpdateTarget[]; readonly skipped: SkippedMachine[] } {
   const targets: ServerUpdateTarget[] = [];
   const skipped: SkippedMachine[] = [];
   for (const machine of machines) {
     const config = machine.serverConfig;
     if (machine.hostedByThisApp) continue;
-    const sameTrack =
-      config !== null && isOnTrack(config.environment.serverVersion, release.channel);
-    if (
-      sameTrack &&
-      resolveVersionMismatch(config.environment.serverVersion, release.version) === null
-    ) {
-      continue;
-    }
     const skip = (reason: string) =>
       skipped.push({ environmentId: machine.environmentId, label: machine.label, reason });
+    const target = (
+      selfUpdate: ServerSelfUpdateCapability,
+      targetVersion: string,
+    ): ServerUpdateTarget => ({
+      environmentId: machine.environmentId,
+      serverLabel: machine.label,
+      selfUpdate,
+      installation: config?.environment.capabilities.serverInstallation,
+      desktopAppUpdate: config !== null && supportsDesktopAppUpdate(config),
+      targetVersion,
+      ...(selfUpdate === "desktop-managed" ? { channel: release.channel } : {}),
+      ...(release.databaseMigration === undefined
+        ? {}
+        : { targetDatabaseMigration: release.databaseMigration }),
+    });
+    const serverVersion = config?.environment.serverVersion;
+    const sameTrack = serverVersion !== undefined && isOnTrack(serverVersion, release.channel);
+    if (
+      config !== null &&
+      sameTrack &&
+      resolveVersionMismatch(serverVersion, release.version) === null
+    ) {
+      const move = trackSwitchMove(config, true);
+      if (
+        !("skip" in move) &&
+        move.selfUpdate === "desktop-managed" &&
+        unavailableReason(machine) === null
+      ) {
+        targets.push({ ...target(move.selfUpdate, serverVersion), trackOnly: true });
+      }
+      continue;
+    }
     const unavailable = unavailableReason(machine);
-    if (config === null || unavailable !== null) {
+    if (config === null || serverVersion === undefined || unavailable !== null) {
       skip(unavailable ?? "not connected");
       continue;
     }
-    const serverVersion = config.environment.serverVersion;
     const move = trackSwitchMove(config, sameTrack);
-    const blocked = channelSwitchBlockReason(serverVersion, release, migrationOf(serverVersion));
     if ("skip" in move) {
       skip(move.skip);
       continue;
     }
+    const blocked = channelSwitchBlockReason(
+      serverVersion,
+      release,
+      config.environment.databaseMigration,
+    );
     if (blocked !== null) {
       skip(blocked);
       continue;
     }
-    const { selfUpdate } = move;
     // Service launchers only accept newer versions, so leaving for an older release is manual.
     if (
-      selfUpdate === "boot-service" &&
+      move.selfUpdate === "boot-service" &&
       compareSemverVersions(release.version, serverVersion) <= 0
     ) {
       skip(
@@ -202,16 +228,7 @@ export function collectChannelSwitchTargets(
       );
       continue;
     }
-    targets.push({
-      environmentId: machine.environmentId,
-      serverLabel: machine.label,
-      selfUpdate,
-      installation: config.environment.capabilities.serverInstallation,
-      desktopAppUpdate: supportsDesktopAppUpdate(config),
-      targetVersion: release.version,
-      // Even a host already on the track may have the other track saved; pin both.
-      ...(selfUpdate === "desktop-managed" ? { channel: release.channel } : {}),
-    });
+    targets.push(target(move.selfUpdate, release.version));
   }
   return { targets, skipped };
 }

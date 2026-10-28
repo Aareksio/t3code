@@ -53,8 +53,10 @@ does. The dialog says why: update a machine on Nightly first when its release is
 too old to check, or stay on Nightly until a Stable release includes the
 changes. A Mac running the desktop app must switch on that Mac.
 
-If some machines did not switch, **Update track** shows how many and offers to
-switch them.
+Each machine keeps the new track even if its switch did not finish. It never
+installs an older release on its own, so try again later. **Update track**
+shows how many machines still run the other track. **Review** opens the same
+dialog with fresh checks.
 
 ## Before you update
 

@@ -2,6 +2,7 @@ import { assert, describe, it } from "@effect/vitest";
 import { DESKTOP_UPDATE_RESTART_MARKER_FILE } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -771,6 +772,51 @@ describe("DesktopUpdates", () => {
       }),
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
+
+  it.effect("keeps a saved Stable track across a restart without offering an older release", () => {
+    // A Nightly build whose switch to Stable did not finish before the app quit.
+    const harness = makeHarness({ appVersion: "1.2.4-nightly.20261027.1", savedChannel: "latest" });
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        yield* updates.check("startup");
+
+        assert.equal((yield* updates.getState).channel, "latest");
+        assert.deepEqual(harness.checkAllowedDowngrade, [false]);
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
+  it.effect("waits out a background check instead of refusing a track change", () =>
+    Effect.gen(function* () {
+      const checkStarted = yield* Deferred.make<void>();
+      const releaseCheck = yield* Deferred.make<void>();
+      const harness = makeHarness({
+        beforeSetUpdateChannel: Effect.void,
+        checkForUpdates: Deferred.succeed(checkStarted, undefined).pipe(
+          Effect.andThen(Deferred.await(releaseCheck)),
+        ),
+      });
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const updates = yield* DesktopUpdates.DesktopUpdates;
+          yield* updates.configure;
+          yield* updates.check("poll").pipe(Effect.forkScoped);
+          yield* Deferred.await(checkStarted);
+
+          const channelFiber = yield* updates.setChannel("nightly").pipe(Effect.forkScoped);
+          yield* Deferred.succeed(releaseCheck, undefined);
+          yield* TestClock.adjust(Duration.seconds(2));
+          const state = yield* Fiber.join(channelFiber);
+
+          assert.equal(state.channel, "nightly");
+        }),
+      ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+    }),
+  );
 
   it.effect("rejects checks while an update channel change is being persisted", () =>
     Effect.gen(function* () {

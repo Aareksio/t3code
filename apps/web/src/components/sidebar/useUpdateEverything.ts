@@ -49,15 +49,10 @@ export function isHostedByThisApp(
 
 export type ReportLocalUpdateError = (title: string, description: string) => void;
 
-/** Present when the run switches the fleet's update track instead of updating it. */
-export interface ChannelSwitch {
-  readonly release: ChannelSwitchRelease;
-  readonly migrationOf: (version: string) => number | undefined;
-}
-
+/** `channelSwitch` makes the run move the fleet to that release's track instead of updating it. */
 export function useUpdateEverything(
   localUpdateVersion: string | null,
-  channelSwitch?: ChannelSwitch,
+  channelSwitch?: ChannelSwitchRelease,
 ) {
   const targetVersion = localUpdateVersion ?? APP_VERSION;
   const { environments } = useEnvironments();
@@ -74,7 +69,7 @@ export function useUpdateEverything(
     updateState: updateStates[index]!,
   }));
   const { targets: behindServers, skipped: unreachable } = channelSwitch
-    ? collectChannelSwitchTargets(machines, channelSwitch.release, channelSwitch.migrationOf)
+    ? collectChannelSwitchTargets(machines, channelSwitch)
     : collectServerUpdateTargets(machines, targetVersion);
   // Desktop-managed servers use their app feed; only npm installs need to wait for publication.
   // A track switch's target came from npm already.
@@ -96,7 +91,9 @@ export function useUpdateEverything(
         reason: `t3@${targetVersion} is not on npm yet`,
       })),
   ];
-  const restarts = collectRestartingMachines(machines, servers, localUpdateVersion !== null);
+  // Track-only hosts save a setting and restart nothing, so they are neither listed nor counted.
+  const moving = servers.filter((server) => server.trackOnly !== true);
+  const restarts = collectRestartingMachines(machines, moving, localUpdateVersion !== null);
   const providerUpdates = useProviderUpdates();
   // A track switch moves app and servers only; provider updates stay a separate choice.
   const providers = channelSwitch ? { machines: [], updateAll: async () => [] } : providerUpdates;
@@ -105,7 +102,7 @@ export function useUpdateEverything(
   const view = describeUpdateEverything({
     localVersion: localUpdateVersion,
     localMachines: machines.filter((machine) => machine.hostedByThisApp),
-    servers,
+    servers: moving,
     skipped,
     providerMachines: providers.machines.map((machine) => ({
       environmentId: machine.environmentId,

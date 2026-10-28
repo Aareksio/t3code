@@ -1,7 +1,5 @@
-import * as NodeSqlite from "node:sqlite";
-
 import packageJson from "../../package.json" with { type: "json" };
-import { migrationManifest } from "../persistence/Migrations.ts";
+import { BUILD_MIGRATION_HEAD, recordedMigrations } from "../persistence/databaseMigrationHead.ts";
 import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
 
 export type ServicePreflightResult =
@@ -51,29 +49,9 @@ export function runServicePreflight(input: {
 
 /** Migrations a newer build recorded. Startup already handles renamed ids this build knows. */
 function newerRecordedMigrations(databasePath: string): ReadonlyArray<string> {
-  let db: NodeSqlite.DatabaseSync;
-  try {
-    db = new NodeSqlite.DatabaseSync(databasePath, { readOnly: true });
-  } catch {
-    return [];
-  }
-  try {
-    const hasTable = db
-      .prepare(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'",
-      )
-      .get();
-    if (hasTable === undefined) return [];
-    const latestKnownId = Math.max(...migrationManifest.map(([id]) => id));
-    return db
-      .prepare(
-        "SELECT migration_id, name FROM effect_sql_migrations WHERE migration_id > ? ORDER BY migration_id",
-      )
-      .all(latestKnownId)
-      .map((row) => `${String(row.migration_id)}_${String(row.name)}`);
-  } finally {
-    db.close();
-  }
+  return recordedMigrations(databasePath)
+    .filter(({ id }) => id > BUILD_MIGRATION_HEAD)
+    .map(({ id, name }) => `${id}_${name}`);
 }
 
 export function decodeServicePreflightResult(value: unknown): ServicePreflightResult | undefined {

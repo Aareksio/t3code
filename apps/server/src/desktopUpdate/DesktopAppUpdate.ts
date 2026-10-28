@@ -72,6 +72,7 @@ export const make = Effect.fn("desktopUpdate.desktopAppUpdate.make")(function* (
     reportProgress: (
       stage: ServerSelfUpdateProgressStage,
     ) => Effect.Effect<void, ServerSelfUpdateError>,
+    trackSwitch: boolean,
   ) {
     const lastStage = yield* Ref.make<ServerSelfUpdateProgressStage | null>(null);
     const emitStage = (
@@ -123,6 +124,11 @@ export const make = Effect.fn("desktopUpdate.desktopAppUpdate.make")(function* (
       return { targetVersion, method: "desktop-app" as const, desktopUpdateToken: requestId };
     }
     if (report.outcome === "up-to-date") {
+      // A switch's host already on the newest build of its track only saved the track.
+      if (trackSwitch) {
+        yield* Ref.set(inFlight, false);
+        return { targetVersion: report.state.currentVersion, method: "desktop-app" as const };
+      }
       return yield* failWith(
         `The T3 Code desktop app on this machine is already up to date on ${report.state.currentVersion}.`,
       );
@@ -161,7 +167,12 @@ export const make = Effect.fn("desktopUpdate.desktopAppUpdate.make")(function* (
                 failWith("Could not reach the T3 Code desktop app on this machine.", error),
               ),
             );
-          return yield* consumeReports(requestId, changes, reportProgress).pipe(
+          return yield* consumeReports(
+            requestId,
+            changes,
+            reportProgress,
+            trackSwitch !== undefined,
+          ).pipe(
             Effect.onInterrupt(() => receiver.cancelDesktopUpdate(requestId).pipe(Effect.ignore)),
           );
         }),

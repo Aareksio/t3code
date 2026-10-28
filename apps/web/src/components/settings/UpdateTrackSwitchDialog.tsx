@@ -1,7 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import type { DesktopUpdateChannel } from "@t3tools/contracts";
-import { desktopUpdateChannelOf } from "@t3tools/shared/cliRelease";
+import { acceptsTrackSwitchRelease, desktopUpdateChannelOf } from "@t3tools/shared/cliRelease";
 import { isMacPlatform } from "@t3tools/shared/keybindings";
 import { useState } from "react";
 import { AsyncResult } from "effect/reactivity";
@@ -9,7 +9,7 @@ import { AsyncResult } from "effect/reactivity";
 import { APP_VERSION } from "~/branding";
 import { useDesktopUpdateState } from "~/state/desktopUpdate";
 import { useEnvironments } from "~/state/environments";
-import { npmReleaseAtom, npmReleaseMigrationsAtom } from "~/state/npmRelease";
+import { npmReleaseAtom } from "~/state/npmRelease";
 import { downloadLocalUpdate, installLocalUpdate } from "../sidebar/SidebarUpdatePill";
 import { UpdateEverythingDialog } from "../sidebar/UpdateEverythingDialog";
 import {
@@ -17,7 +17,7 @@ import {
   channelSwitchLabel,
   type ChannelSwitchRelease,
 } from "../sidebar/updateEverything.logic";
-import { useUpdateEverything } from "../sidebar/useUpdateEverything";
+import { isHostedByThisApp, useUpdateEverything } from "../sidebar/useUpdateEverything";
 import { prepareLocalTrackSwitch } from "./updateTrackSwitch.logic";
 import {
   AlertDialog,
@@ -41,28 +41,8 @@ export function UpdateTrackSwitchDialog({
 }) {
   // npm dist-tags match the desktop channel names.
   const release = useAtomValue(npmReleaseAtom(channel));
-  const { environments } = useEnvironments();
-  const versions = [
-    APP_VERSION,
-    ...environments.flatMap(({ serverConfig }) =>
-      serverConfig ? [serverConfig.environment.serverVersion] : [],
-    ),
-  ];
-  // Joining Nightly is never blocked, so it needs no migration lookups.
-  // Frozen at open, so servers restarting mid-check cannot reset the dialog.
-  const [versionsKey] = useState(() =>
-    channel === "nightly" ? "" : [...new Set(versions)].join("\n"),
-  );
-  const migrations = useAtomValue(npmReleaseMigrationsAtom(versionsKey));
-  const loaded = AsyncResult.isSuccess(release) && AsyncResult.isSuccess(migrations);
-  if (loaded && release.value !== null) {
-    return (
-      <SwitchPlan
-        release={{ channel, ...release.value }}
-        migrationOf={(version) => migrations.value.get(version)}
-        onClose={onClose}
-      />
-    );
+  if (AsyncResult.isSuccess(release) && release.value !== null) {
+    return <SwitchPlan release={{ channel, ...release.value }} onClose={onClose} />;
   }
   const label = channelSwitchLabel(channel);
   return (
@@ -71,7 +51,7 @@ export function UpdateTrackSwitchDialog({
         <AlertDialogHeader>
           <AlertDialogTitle>Switch to {label}</AlertDialogTitle>
           <AlertDialogDescription>
-            {AsyncResult.isFailure(release) || (loaded && release.value === null)
+            {AsyncResult.isFailure(release) || AsyncResult.isSuccess(release)
               ? `Could not find the latest ${label} release on npm. Try again later.`
               : "Checking releases…"}
           </AlertDialogDescription>
@@ -86,26 +66,29 @@ export function UpdateTrackSwitchDialog({
 
 function SwitchPlan({
   release,
-  migrationOf,
   onClose,
 }: {
   readonly release: ChannelSwitchRelease;
-  readonly migrationOf: (version: string) => number | undefined;
   readonly onClose: () => void;
 }) {
   const updateState = useDesktopUpdateState();
+  const { environments } = useEnvironments();
   const crossesLocal = desktopUpdateChannelOf(APP_VERSION) !== release.channel;
   // With its updater off (a .deb install, or no feed) this app stays put and only remotes move.
   const updatesOff = updateState?.enabled === false;
   // After a partial switch this app may already be on the track; then only remotes move.
   const switchesLocal = crossesLocal && !updatesOff;
   const [checking, setChecking] = useState(false);
-  const everything = useUpdateEverything(switchesLocal ? release.version : null, {
-    release,
-    migrationOf,
-  });
+  const everything = useUpdateEverything(switchesLocal ? release.version : null, release);
   const label = channelSwitchLabel(release.channel);
-  const localBlocked = channelSwitchBlockReason(APP_VERSION, release, migrationOf(APP_VERSION));
+  // This app's reinstall restarts every server it hosts, so each of their databases must allow it.
+  const hosted = environments.filter(isHostedByThisApp);
+  const localBlocked =
+    (hosted.length === 0 ? [undefined] : hosted.map((environment) => environment.serverConfig))
+      .map((config) =>
+        channelSwitchBlockReason(APP_VERSION, release, config?.environment.databaseMigration),
+      )
+      .find((reason) => reason !== null) ?? null;
 
   const run = async () => {
     const bridge = window.desktopBridge;
@@ -138,7 +121,21 @@ function SwitchPlan({
                       downloadLocalUpdate(bridge, { notifyDownloaded: false, reportError }),
                   }
                 : {}),
-              installLocal: (reportError) => installLocalUpdate(bridge, reportError),
+              // Install only a build the database check covers, pinned so nothing replaces it.
+              installLocal: async (reportError) => {
+                const { downloadedVersion } = await bridge.getUpdateState();
+                if (
+                  downloadedVersion === null ||
+                  !acceptsTrackSwitchRelease(downloadedVersion, release.channel, release.version)
+                ) {
+                  reportError(
+                    "Could not install update",
+                    `This app downloaded ${downloadedVersion ?? "nothing"}, not ${release.version} or newer.`,
+                  );
+                  return false;
+                }
+                return installLocalUpdate(bridge, reportError, downloadedVersion);
+              },
             },
       ),
     );

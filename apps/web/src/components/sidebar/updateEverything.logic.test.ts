@@ -90,20 +90,19 @@ describe("collectChannelSwitchTargets", () => {
   const NIGHTLY = "0.1.4-nightly.20261027.3796";
   const OLD_NIGHTLY = "0.1.3-nightly.20261001.3500";
   const NEWER_NIGHTLY = "0.1.4-nightly.20261020.3700";
-  const migrations: Record<string, number> = {
-    [NIGHTLY]: 72,
-    [NEWER_NIGHTLY]: 69,
-    [OLD_NIGHTLY]: 69,
-    "0.1.3": 69,
-  };
-  const migrationOf = (version: string) => migrations[version];
-  const onMac = (base: UpdateEverythingMachine): UpdateEverythingMachine => ({
+  // What each server reports as its database's highest migration.
+  const host = (
+    base: UpdateEverythingMachine,
+    databaseMigration: number | undefined,
+    os: "linux" | "darwin" = "linux",
+  ): UpdateEverythingMachine => ({
     ...base,
     serverConfig: {
       ...base.serverConfig!,
       environment: {
         ...base.serverConfig!.environment,
-        platform: { os: "darwin", arch: "arm64" },
+        platform: { os, arch: "x64" },
+        ...(databaseMigration === undefined ? {} : { databaseMigration }),
       },
     },
   });
@@ -112,35 +111,44 @@ describe("collectChannelSwitchTargets", () => {
     const stable = { channel: "latest" as const, version: "0.1.3", databaseMigration: 69 };
     const { targets, skipped } = collectChannelSwitchTargets(
       [
-        machine("this-app", NIGHTLY, "desktop-managed", { hostedByThisApp: true }),
-        machine("old-service", OLD_NIGHTLY, "boot-service"),
+        host(machine("this-app", NIGHTLY, "desktop-managed", { hostedByThisApp: true }), 72),
+        host(machine("old-service", OLD_NIGHTLY, "boot-service"), 69),
         // Service launchers refuse older versions, even when the database allows it.
-        machine("newer-service", NEWER_NIGHTLY, "boot-service"),
-        machine("linux-desktop", OLD_NIGHTLY, "desktop-managed"),
-        machine("new-service", NIGHTLY, "boot-service"),
-        machine("unknown-service", "0.1.2-nightly.20260901.3000", "boot-service"),
-        onMac(machine("mac-desktop", OLD_NIGHTLY, "desktop-managed")),
-        machine("preview", "0.1.3-preview.20261026.3702", "boot-service"),
-        machine("stable", "0.1.3", "boot-service"),
-        // Already on Stable, but its saved track may still say Nightly.
-        machine("stable-desktop", "0.1.2", "desktop-managed"),
+        host(machine("newer-service", NEWER_NIGHTLY, "boot-service"), 69),
+        host(machine("linux-desktop", OLD_NIGHTLY, "desktop-managed"), 69),
+        host(machine("new-service", NIGHTLY, "boot-service"), 72),
+        host(machine("old-server", "0.1.2-nightly.20260901.3000", "boot-service"), undefined),
+        host(machine("mac-desktop", OLD_NIGHTLY, "desktop-managed"), 69, "darwin"),
+        host(machine("preview", "0.1.3-preview.20261026.3702", "boot-service"), 69),
+        host(machine("stable", "0.1.3", "boot-service"), 69),
+        host(machine("stable-desktop", "0.1.2", "desktop-managed"), 68),
+        // Already current, but its saved track may still say Nightly.
+        host(machine("current-desktop", "0.1.3", "desktop-managed"), 69, "darwin"),
       ],
       stable,
-      migrationOf,
     );
 
-    expect(targets.map((target) => [target.serverLabel, target.channel])).toEqual([
-      ["old-service", undefined],
-      ["linux-desktop", "latest"],
-      ["stable-desktop", "latest"],
+    expect(
+      targets.map((target) => [
+        target.serverLabel,
+        target.targetVersion,
+        target.channel,
+        target.trackOnly ?? false,
+      ]),
+    ).toEqual([
+      ["old-service", "0.1.3", undefined, false],
+      ["linux-desktop", "0.1.3", "latest", false],
+      ["stable-desktop", "0.1.3", "latest", false],
+      ["current-desktop", "0.1.3", "latest", true],
     ]);
+    expect(targets.every((target) => target.targetDatabaseMigration === 69)).toBe(true);
     expect(skipped.map((entry) => [entry.label, entry.reason])).toEqual([
       ["newer-service", "run `t3 update --channel stable --allow-downgrade` there"],
       [
         "new-service",
         "its database has changes 0.1.3 does not support yet; stay on Nightly until Stable has them",
       ],
-      ["unknown-service", "its release predates database checks; update it on Nightly first"],
+      ["old-server", "its server predates database checks; update it on Nightly first"],
       ["mac-desktop", "switch the Mac app on that Mac"],
       ["preview", "runs a preview build"],
     ]);
@@ -163,7 +171,6 @@ describe("collectChannelSwitchTargets", () => {
         machine("current", NIGHTLY, "boot-service"),
       ],
       nightly,
-      () => undefined,
     );
 
     expect(targets.map((target) => [target.serverLabel, target.targetVersion])).toEqual([

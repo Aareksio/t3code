@@ -55,6 +55,10 @@ export interface ServerUpdateTarget {
   readonly targetVersion: string;
   /** Set only by a track switch; the host's desktop app moves to this track. */
   readonly channel?: DesktopUpdateChannel;
+  /** A track switch's checked release migration; the host re-checks its own database. */
+  readonly targetDatabaseMigration?: number;
+  /** The host already runs its track's newest build and only saves the track. */
+  readonly trackOnly?: boolean;
 }
 
 type UpdateButtonProps = Pick<ComponentProps<typeof Button>, "variant" | "size" | "className"> & {
@@ -85,6 +89,9 @@ export function useServerUpdate() {
       input: {
         targetVersion,
         ...(target.channel === undefined ? {} : { channel: target.channel }),
+        ...(target.targetDatabaseMigration === undefined
+          ? {}
+          : { targetDatabaseMigration: target.targetDatabaseMigration }),
       },
     });
     pendingUpdateEnvironmentIds.delete(environmentId);

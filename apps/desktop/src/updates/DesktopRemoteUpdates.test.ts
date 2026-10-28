@@ -149,43 +149,97 @@ describe("DesktopRemoteUpdates", () => {
     );
   });
 
-  it.effect(
-    "refuses a track switch whose feed offers another release and restores the track",
-    () => {
-      const harness = makeHarness({ beforeSetUpdateChannel: Effect.void });
+  it.effect("refuses a crossing whose feed offers only an older build, and keeps the track", () => {
+    const harness = makeHarness({ beforeSetUpdateChannel: Effect.void });
 
-      return runRemoteUpdatesTest(harness, ({ reports, requests }) =>
-        Effect.gen(function* () {
-          const updates = yield* DesktopUpdates.DesktopUpdates;
-          yield* Queue.offer(requests, {
-            ...request("req-mismatch"),
-            channel: "nightly",
-            targetVersion: "1.2.4-nightly.20261027.1",
-          });
-          yield* settle;
-          // The first mismatch triggers this request's own check; the refusal follows if it agrees.
-          harness.emit("update-available", { version: "1.2.4-nightly.20261028.2" });
-          yield* settle;
-          assert.deepEqual(terminalReports(reports), []);
-          harness.emit("update-available", { version: "1.2.4-nightly.20261028.2" });
-          yield* settle;
+    return runRemoteUpdatesTest(harness, ({ reports, requests }) =>
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        const older = "1.2.4-nightly.20261020.1";
+        yield* Queue.offer(requests, {
+          ...request("req-older"),
+          channel: "nightly",
+          targetVersion: "1.2.4-nightly.20261027.1",
+        });
+        yield* settle;
+        // The first offer triggers this request's own check; the refusal follows if it agrees.
+        harness.emit("update-available", { version: older });
+        yield* settle;
+        assert.deepEqual(terminalReports(reports), []);
+        harness.emit("update-available", { version: older });
+        yield* settle;
 
-          const terminals = terminalReports(reports);
-          assert.deepEqual(
-            terminals.map((report) => report.outcome),
-            ["failed"],
-          );
-          assert.include(terminals[0]?.reason ?? "", "found 1.2.4-nightly.20261028.2");
-          assert.equal(harness.downloadCount(), 0);
-          assert.equal((yield* updates.getState).channel, "latest");
-        }),
-      );
-    },
-  );
+        const terminals = terminalReports(reports);
+        assert.deepEqual(
+          terminals.map((report) => report.outcome),
+          ["failed"],
+        );
+        assert.include(terminals[0]?.reason ?? "", `found ${older}`);
+        assert.equal(harness.downloadCount(), 0);
+        // The saved track is the user's intent; a retry picks it up from here.
+        assert.equal((yield* updates.getState).channel, "nightly");
+      }),
+    );
+  });
 
-  it.effect("reports a failed install and restores the track a switch left", () => {
+  it.effect("only saves the track on a host already running the release", () => {
+    const harness = makeHarness({ savedChannel: "nightly" });
+
+    return runRemoteUpdatesTest(harness, ({ reports, requests }) =>
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* Queue.offer(requests, {
+          ...request("req-track-only"),
+          channel: "latest",
+          targetVersion: "1.2.3",
+        });
+        yield* settle;
+        // Answers the track change's check, then the request's own check.
+        harness.emit("update-not-available");
+        yield* settle;
+        harness.emit("update-not-available");
+        yield* settle;
+
+        assert.deepEqual(
+          terminalReports(reports).map((report) => report.outcome),
+          ["up-to-date"],
+        );
+        assert.equal((yield* updates.getState).channel, "latest");
+        assert.equal(harness.downloadCount(), 0);
+      }),
+    );
+  });
+
+  it.effect("accepts a newer build than the checked release on the requested track", () => {
+    const harness = makeHarness({ beforeSetUpdateChannel: Effect.void });
+
+    return runRemoteUpdatesTest(harness, ({ reports, requests }) =>
+      Effect.gen(function* () {
+        const newer = "1.2.4-nightly.20261028.2";
+        yield* Queue.offer(requests, {
+          ...request("req-newer"),
+          channel: "nightly",
+          targetVersion: "1.2.4-nightly.20261027.1",
+        });
+        yield* settle;
+        harness.emit("update-available", { version: newer });
+        yield* settle;
+        harness.emit("update-downloaded", { version: newer });
+        yield* settle;
+
+        assert.deepEqual(
+          terminalReports(reports).map((report) => [
+            report.outcome,
+            report.state.downloadedVersion,
+          ]),
+          [["ready-to-install", newer]],
+        );
+      }),
+    );
+  });
+
+  it.effect("reports a failed outcome when quitAndInstall fails", () => {
     const harness = makeHarness({
-      beforeSetUpdateChannel: Effect.void,
       quitAndInstall: Effect.fail(
         new ElectronUpdater.ElectronUpdaterQuitAndInstallError({
           channel: "latest",
@@ -198,17 +252,11 @@ describe("DesktopRemoteUpdates", () => {
 
     return runRemoteUpdatesTest(harness, ({ reports, requests, commits }) =>
       Effect.gen(function* () {
-        const updates = yield* DesktopUpdates.DesktopUpdates;
-        const nightly = "1.2.4-nightly.20261027.1";
-        yield* Queue.offer(requests, {
-          ...request("req-4"),
-          channel: "nightly",
-          targetVersion: nightly,
-        });
+        yield* Queue.offer(requests, request("req-4"));
         yield* settle;
-        harness.emit("update-available", { version: nightly });
+        harness.emit("update-available", { version: "1.2.4" });
         yield* settle;
-        harness.emit("update-downloaded", { version: nightly });
+        harness.emit("update-downloaded", { version: "1.2.4" });
         yield* settle;
 
         yield* Queue.offer(commits, {
@@ -224,9 +272,6 @@ describe("DesktopRemoteUpdates", () => {
           ["ready-to-install", "failed"],
         );
         assert.equal(terminals[1]?.state.errorContext, "install");
-        yield* TestClock.adjust(Duration.seconds(2));
-        yield* settle;
-        assert.equal((yield* updates.getState).channel, "latest");
       }),
     );
   });
@@ -599,36 +644,6 @@ describe("DesktopRemoteUpdates", () => {
     );
   });
 
-  it.effect("restores the track when a prepared switch is never committed", () => {
-    const harness = makeHarness({ beforeSetUpdateChannel: Effect.void });
-
-    return runRemoteUpdatesTest(harness, ({ reports, requests }) =>
-      Effect.gen(function* () {
-        const updates = yield* DesktopUpdates.DesktopUpdates;
-        const nightly = "1.2.4-nightly.20261027.1";
-        yield* Queue.offer(requests, {
-          ...request("req-abandoned"),
-          channel: "nightly",
-          targetVersion: nightly,
-        });
-        yield* settle;
-        harness.emit("update-available", { version: nightly });
-        yield* settle;
-        harness.emit("update-downloaded", { version: nightly });
-        yield* settle;
-        assert.deepEqual(
-          terminalReports(reports).map((report) => report.outcome),
-          ["ready-to-install"],
-        );
-
-        yield* TestClock.adjust(Duration.minutes(6));
-        yield* settle;
-
-        assert.equal((yield* updates.getState).channel, "latest");
-      }),
-    );
-  });
-
   it.effect("cancels a track switch while its own feed check is still running", () => {
     const releaseCheck = Deferred.makeUnsafe<void>();
     const harness = makeHarness({
@@ -638,23 +653,27 @@ describe("DesktopRemoteUpdates", () => {
 
     return runRemoteUpdatesTest(harness, ({ requests, cancellations }) =>
       Effect.gen(function* () {
-        const updates = yield* DesktopUpdates.DesktopUpdates;
         yield* Queue.offer(requests, {
           ...request("req-switch-cancel"),
           channel: "nightly",
           targetVersion: "1.2.4-nightly.20261027.1",
         });
         yield* settle;
-        assert.equal((yield* updates.getState).channel, "nightly");
-
+        const updates = yield* DesktopUpdates.DesktopUpdates;
         yield* Queue.offer(cancellations, {
           version: 1,
           type: "cancelDesktopUpdate",
           requestId: "req-switch-cancel",
         });
         yield* settle;
+        // The next request starts without waiting for the cancelled switch's feed check.
+        yield* Queue.offer(requests, {
+          ...request("req-switch-back"),
+          channel: "latest",
+          targetVersion: "1.2.3",
+        });
+        yield* settle;
 
-        // Restored without waiting for the switch's feed check to finish.
         assert.equal((yield* updates.getState).channel, "latest");
         yield* Deferred.succeed(releaseCheck, undefined);
       }),
@@ -706,53 +725,41 @@ describe("DesktopRemoteUpdates", () => {
     );
   });
 
-  it.effect(
-    "does not install after cancellation wins the commit claim, and restores the track",
-    () => {
-      const harness = makeHarness({ beforeSetUpdateChannel: Effect.void });
+  it.effect("does not install after cancellation wins the commit claim", () => {
+    const harness = makeHarness();
 
-      return runRemoteUpdatesTest(harness, ({ reports, requests, commits, cancellations }) =>
-        Effect.gen(function* () {
-          const updates = yield* DesktopUpdates.DesktopUpdates;
-          const nightly = "1.2.4-nightly.20261027.1";
-          yield* Queue.offer(requests, {
-            ...request("req-cancel-before-commit"),
-            channel: "nightly",
-            targetVersion: nightly,
-          });
-          yield* settle;
-          harness.emit("update-available", { version: nightly });
-          yield* settle;
-          harness.emit("update-downloaded", { version: nightly });
-          yield* settle;
+    return runRemoteUpdatesTest(harness, ({ reports, requests, commits, cancellations }) =>
+      Effect.gen(function* () {
+        yield* Queue.offer(requests, request("req-cancel-before-commit"));
+        yield* settle;
+        harness.emit("update-available", { version: "1.2.4" });
+        yield* settle;
+        harness.emit("update-downloaded", { version: "1.2.4" });
+        yield* settle;
 
-          yield* Queue.offer(cancellations, {
-            version: 1,
-            type: "cancelDesktopUpdate",
-            requestId: "req-cancel-before-commit",
-          });
-          yield* settle;
-          yield* Queue.offer(commits, {
-            version: 1,
-            type: "commitDesktopUpdate",
-            requestId: "req-cancel-before-commit",
-          });
-          yield* settle;
+        yield* Queue.offer(cancellations, {
+          version: 1,
+          type: "cancelDesktopUpdate",
+          requestId: "req-cancel-before-commit",
+        });
+        yield* settle;
+        yield* Queue.offer(commits, {
+          version: 1,
+          type: "commitDesktopUpdate",
+          requestId: "req-cancel-before-commit",
+        });
+        yield* settle;
 
-          assert.equal(harness.quitAndInstalls(), 0);
-          assert.deepEqual(
-            terminalReports(reports)
-              .filter((report) => report.requestId === "req-cancel-before-commit")
-              .map((report) => report.outcome),
-            ["ready-to-install", "failed"],
-          );
-          yield* TestClock.adjust(Duration.seconds(2));
-          yield* settle;
-          assert.equal((yield* updates.getState).channel, "latest");
-        }),
-      );
-    },
-  );
+        assert.equal(harness.quitAndInstalls(), 0);
+        assert.deepEqual(
+          terminalReports(reports)
+            .filter((report) => report.requestId === "req-cancel-before-commit")
+            .map((report) => report.outcome),
+          ["ready-to-install", "failed"],
+        );
+      }),
+    );
+  });
 
   it.effect("retains an install failure after cancellation loses the commit claim", () => {
     const installStarted = Deferred.makeUnsafe<void>();

@@ -19,6 +19,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
@@ -49,6 +50,8 @@ import {
   resolveNotAppliedInstallVersion,
 } from "./updateMachine.ts";
 
+const CHANNEL_CHANGE_RETRY_DELAY = Duration.seconds(1);
+const CHANNEL_CHANGE_RETRIES = 30;
 const AUTO_UPDATE_STARTUP_DELAY = "15 seconds";
 const AUTO_UPDATE_POLL_INTERVAL = "4 minutes";
 const PREPARED_INSTALL_CHECK_WAIT = Duration.seconds(90);
@@ -1117,7 +1120,14 @@ export const make = Effect.gen(function* () {
       nextChannel: DesktopUpdateChannel,
     ) {
       yield* Effect.annotateCurrentSpan({ channel: nextChannel });
-      const activeAction = yield* tryStartChannelChange;
+      // A background check holds the updater only briefly, so wait it out instead of refusing.
+      const activeAction = yield* tryStartChannelChange.pipe(
+        Effect.repeat({
+          while: (active) => Option.isSome(active) && active.value === "check",
+          schedule: Schedule.spaced(CHANNEL_CHANGE_RETRY_DELAY),
+          times: CHANNEL_CHANGE_RETRIES,
+        }),
+      );
       if (Option.isSome(activeAction)) {
         return yield* new DesktopUpdateActionInProgressError({
           action: activeAction.value === "install-recovery" ? "install" : activeAction.value,

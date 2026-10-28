@@ -6,6 +6,10 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 
+import {
+  BUILD_MIGRATION_HEAD,
+  databaseMigrationHead,
+} from "../persistence/databaseMigrationHead.ts";
 import { migrationManifest } from "../persistence/Migrations.ts";
 
 import { runServicePreflight } from "./servicePreflight.ts";
@@ -46,6 +50,7 @@ it.layer(NodeServices.layer)("service preflight database", (it) => {
         runServicePreflight({ databasePath, launcherProtocol: SERVICE_LAUNCHER_PROTOCOL });
 
       expect(preflight().status).toBe("ready");
+      expect(databaseMigrationHead(databasePath)).toBe(BUILD_MIGRATION_HEAD);
 
       const newerId = Math.max(...migrationManifest.map(([id]) => id)) + 1;
       insert.run(newerId, "FromNightly");
@@ -53,6 +58,8 @@ it.layer(NodeServices.layer)("service preflight database", (it) => {
       const result = preflight();
       expect(result.status).toBe("blocked");
       expect(result.status === "blocked" ? result.reason : "").toContain(`${newerId}_FromNightly`);
+      // Servers report this head, so clients see a database a newer build migrated.
+      expect(databaseMigrationHead(databasePath)).toBe(newerId);
     }),
   );
 });

@@ -323,15 +323,18 @@ function AboutVersionSection() {
           description={
             unswitchedMachines > 0 ? (
               <>
-                {unswitchedMachines === 1 ? "1 machine is" : `${unswitchedMachines} machines are`}{" "}
-                not on {channelSwitchLabel(selectedUpdateChannel)} yet.{" "}
+                {unswitchedMachines === 1
+                  ? "1 machine still runs"
+                  : `${unswitchedMachines} machines still run`}{" "}
+                {channelSwitchLabel(selectedUpdateChannel === "nightly" ? "latest" : "nightly")}.{" "}
+                {/* The dialog moves what it can and says why it skips the rest. */}
                 <Button
                   size="xs"
                   variant="link"
                   disabled={updateRun !== null}
                   onClick={() => setSwitchChannel(selectedUpdateChannel)}
                 >
-                  Switch them
+                  Review
                 </Button>
               </>
             ) : (

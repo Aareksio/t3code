@@ -20,11 +20,12 @@ import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import { HttpClient } from "effect/http";
 
-import { CLI_RELEASE_BASE_URL_ENV } from "@t3tools/shared/cliRelease";
+import { CLI_RELEASE_BASE_URL_ENV, cliReleaseChannelOf } from "@t3tools/shared/cliRelease";
 
 import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
 import * as DesktopAppUpdate from "../desktopUpdate/DesktopAppUpdate.ts";
+import { databaseMigrationHead } from "../persistence/databaseMigrationHead.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import {
   ensurePinnedRuntimeInstalled,
@@ -93,6 +94,29 @@ export const pruneRuntimesOnStart = Effect.fn("cloud.server_self_update.prune_on
   },
 );
 
+/** The client checks this when planning; the host checks again because its database may have
+ * moved on since (another client updated it). Leaving Nightly needs the target release to know
+ * every migration this database holds. */
+export function nightlyLeaveBlockReason(input: {
+  readonly serverVersion: string;
+  readonly targetVersion: string;
+  readonly targetDatabaseMigration: number | undefined;
+  readonly databaseMigration: number;
+}): string | null {
+  if (
+    cliReleaseChannelOf(input.serverVersion) !== "nightly" ||
+    cliReleaseChannelOf(input.targetVersion) !== "stable"
+  ) {
+    return null;
+  }
+  if (input.targetDatabaseMigration === undefined) {
+    return `Cannot confirm this database works with t3@${input.targetVersion}; stay on Nightly.`;
+  }
+  return input.targetDatabaseMigration < input.databaseMigration
+    ? `This database has changes t3@${input.targetVersion} does not support yet; stay on Nightly until Stable has them.`
+    : null;
+}
+
 export const make = Effect.fn("cloud.server_self_update.make")(function* () {
   const serverConfig = yield* ServerConfig.ServerConfig;
   const desktopAppUpdate = yield* DesktopAppUpdate.DesktopAppUpdate;
@@ -119,10 +143,22 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
       ? new ServerSelfUpdateError({ reason })
       : new ServerSelfUpdateError({ reason, cause });
 
+  const leavesNightlyUnsafely = (input: ServerSelfUpdateInput) =>
+    nightlyLeaveBlockReason({
+      serverVersion: packageJson.version,
+      targetVersion: input.targetVersion,
+      targetDatabaseMigration: input.targetDatabaseMigration,
+      databaseMigration: databaseMigrationHead(serverConfig.dbPath),
+    });
+
   const update: ServerSelfUpdate["Service"]["update"] = Effect.fn(
     "cloud.server_self_update.update",
   )(function* (input, reportProgress = () => Effect.void, onHandoffAccepted = () => Effect.void) {
+    const unsafeDowngrade = leavesNightlyUnsafely(input);
     if (capability === "desktop-managed") {
+      if (input.channel !== undefined && unsafeDowngrade !== null) {
+        return yield* failWith(unsafeDowngrade);
+      }
       if (desktopAppUpdate.available) {
         return yield* desktopAppUpdate.run(
           reportProgress,
@@ -141,6 +177,7 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
       );
     }
 
+    if (unsafeDowngrade !== null) return yield* failWith(unsafeDowngrade);
     const targetVersion = input.targetVersion.trim();
     if (!isExactServiceVersion(targetVersion)) {
       return yield* failWith(`'${targetVersion}' is not an exact t3 version.`);

@@ -48,21 +48,6 @@ export const npmReleasePublishedAtom = Atom.family((version: string) =>
   ).pipe(Atom.keepAlive, Atom.withLabel(`npm-release-published:${version}`)),
 );
 
-/** Migrations by version for "\n"-joined versions. A failed lookup reads as unknown. */
-export const npmReleaseMigrationsAtom = Atom.family((versions: string) =>
-  Atom.make((get) =>
-    Effect.forEach(
-      versions.split("\n").filter((version) => version !== ""),
-      (version) =>
-        get.result(npmReleaseAtom(version)).pipe(
-          Effect.map((release) => [version, release?.databaseMigration] as const),
-          Effect.orElseSucceed(() => [version, undefined] as const),
-        ),
-      { concurrency: "unbounded" },
-    ).pipe(Effect.map((entries) => new Map(entries))),
-  ).pipe(Atom.withLabel(`npm-release-migrations:${versions}`)),
-);
-
 const NO_VERSION_ATOM = Atom.make(AsyncResult.success(false)).pipe(
   Atom.withLabel("npm-release-published:none"),
 );

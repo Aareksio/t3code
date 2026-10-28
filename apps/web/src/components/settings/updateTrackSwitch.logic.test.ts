@@ -5,11 +5,10 @@ import { prepareLocalTrackSwitch } from "./updateTrackSwitch.logic";
 
 const STABLE = "0.1.3";
 
-/** Like the desktop app, a build on another track re-checks the feed when its track is saved. */
-function fakeBridge(feed: { readonly offer: string | null; readonly failOnce?: boolean }) {
+/** Like the desktop app, saving a track re-checks the feed and reports what it offers. */
+function fakeBridge(offer: string | null | Error) {
   const saved: DesktopUpdateChannel[] = [];
-  let failOnce = feed.failOnce ?? false;
-  let state: DesktopUpdateState = {
+  const base: DesktopUpdateState = {
     enabled: true,
     status: "up-to-date",
     channel: "nightly",
@@ -30,71 +29,48 @@ function fakeBridge(feed: { readonly offer: string | null; readonly failOnce?: b
   return {
     saved,
     bridge: {
-      getUpdateState: async () => state,
       setUpdateChannel: async (channel: DesktopUpdateChannel) => {
         saved.push(channel);
-        if (failOnce) {
-          failOnce = false;
-          throw new Error("feed check failed");
-        }
-        state = {
-          ...state,
+        if (offer instanceof Error) throw offer;
+        return {
+          ...base,
           channel,
-          status: feed.offer === null ? "up-to-date" : "available",
-          availableVersion: feed.offer,
+          status: offer === null ? ("up-to-date" as const) : ("available" as const),
+          availableVersion: offer,
         };
-        return state;
       },
     },
   };
 }
 
+const prepare = (bridge: ReturnType<typeof fakeBridge>["bridge"], reinstall = true) =>
+  prepareLocalTrackSwitch(bridge, { channel: "latest", version: STABLE, reinstall });
+
 describe("prepareLocalTrackSwitch", () => {
-  it("installs only the release the database guard checked", async () => {
-    const ready = fakeBridge({ offer: STABLE });
-    const result = await prepareLocalTrackSwitch(ready.bridge, {
-      channel: "latest",
-      version: STABLE,
-      reinstall: true,
-    });
-    expect(result).toMatchObject({ ok: true, local: { availableVersion: STABLE } });
-    expect(ready.saved).toEqual(["latest"]);
+  it("installs the checked release or a newer one on the track, never an older one", async () => {
+    expect(await prepare(fakeBridge(STABLE).bridge)).toMatchObject({ ok: true });
+    // A newer Stable knows every migration the checked one does.
+    expect(await prepare(fakeBridge("0.1.4").bridge)).toMatchObject({ ok: true });
 
-    const skewed = fakeBridge({ offer: "0.1.2" });
-    expect(
-      await prepareLocalTrackSwitch(skewed.bridge, {
-        channel: "latest",
-        version: STABLE,
-        reinstall: true,
-      }),
-    ).toEqual({
+    const stale = fakeBridge("0.1.2");
+    expect(await prepare(stale.bridge)).toEqual({
       ok: false,
-      message: "This app found 0.1.2, not 0.1.3. Try again in a few minutes.",
+      message: "This app found 0.1.2, which is older than 0.1.3. Try again in a few minutes.",
     });
-    expect(skewed.saved).toEqual(["latest", "nightly"]);
+    // The saved track is intent; "Switch them" retries without re-picking it.
+    expect(stale.saved).toEqual(["latest"]);
   });
 
-  it("restores the old track when saving the new one fails part way", async () => {
-    const broken = fakeBridge({ offer: STABLE, failOnce: true });
-    expect(
-      await prepareLocalTrackSwitch(broken.bridge, {
-        channel: "latest",
-        version: STABLE,
-        reinstall: true,
-      }),
-    ).toEqual({ ok: false, message: "feed check failed" });
-    expect(broken.saved).toEqual(["latest", "nightly"]);
+  it("reports a track that could not be saved", async () => {
+    expect(await prepare(fakeBridge(new Error("feed check failed")).bridge)).toEqual({
+      ok: false,
+      message: "feed check failed",
+    });
   });
 
-  it("saves the track without a check when this app is already on it", async () => {
-    const undo = fakeBridge({ offer: null });
-    expect(
-      await prepareLocalTrackSwitch(undo.bridge, {
-        channel: "latest",
-        version: STABLE,
-        reinstall: false,
-      }),
-    ).toEqual({ ok: true, local: null });
+  it("only saves the track when this app is already on it", async () => {
+    const undo = fakeBridge(null);
+    expect(await prepare(undo.bridge, false)).toEqual({ ok: true, local: null });
     expect(undo.saved).toEqual(["latest"]);
   });
 });

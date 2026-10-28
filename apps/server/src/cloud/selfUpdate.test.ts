@@ -313,3 +313,26 @@ it.layer(NodeServices.layer)("pruning runtimes on start", (it) => {
     }),
   );
 });
+
+it("a host leaves Nightly only for a release that knows its whole database", () => {
+  const leave = (targetDatabaseMigration: number | undefined, databaseMigration = 72) =>
+    ServerSelfUpdate.nightlyLeaveBlockReason({
+      serverVersion: "0.1.4-nightly.20261027.3796",
+      targetVersion: "0.1.4",
+      targetDatabaseMigration,
+      databaseMigration,
+    });
+
+  expect(leave(72)).toBeNull();
+  // Another client moved this host to a newer Nightly after the switch was planned.
+  expect(leave(72, 73)).toContain("does not support yet");
+  expect(leave(undefined)).toContain("Cannot confirm");
+  expect(
+    ServerSelfUpdate.nightlyLeaveBlockReason({
+      serverVersion: "0.1.3",
+      targetVersion: "0.1.4-nightly.20261027.3796",
+      targetDatabaseMigration: undefined,
+      databaseMigration: 72,
+    }),
+  ).toBeNull();
+});

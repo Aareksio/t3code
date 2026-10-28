@@ -189,9 +189,12 @@ export const readSubmission = Effect.gen(function* () {
         }),
     ),
   );
-  const fields = yield* decodeSubmit({ shareId: parts.shareId, text: parts.text ?? "" }).pipe(
-    Effect.option,
-  );
+  const text = parts.text ?? "";
+  const fields = yield* decodeSubmit({
+    shareId: parts.shareId,
+    // Form encoding sends each line break as CRLF, which would count twice against the limit.
+    text: typeof text === "string" ? text.replaceAll("\r\n", "\n") : text,
+  }).pipe(Effect.option);
   if (fields._tag === "None") return null;
   const files = parts.file;
   const uploads: ReadonlyArray<GuestUpload> = Array.isArray(files)

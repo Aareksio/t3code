@@ -9,7 +9,10 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import { exhaustedUsageWindow } from "@t3tools/shared/usageLimits";
-import { fallbackTextGenerationModelSelection } from "@t3tools/shared/serverSettings";
+import {
+  defaultTextGenerationModel,
+  fallbackTextGenerationModelSelection,
+} from "@t3tools/shared/serverSettings";
 import * as ServerSettings from "../serverSettings.ts";
 import type { ProviderTextGeneration } from "@t3tools/provider-core/server/textGeneration";
 import { TextGenerationError } from "@t3tools/contracts";
@@ -113,7 +116,7 @@ export const make = Effect.gen(function* () {
               isProviderAvailable(provider) &&
               isProviderTextGenerationCapable(provider) &&
               (operation !== "generateReviewGuide" || INVESTIGATING_DRIVERS.has(driver)) &&
-              !exhaustedUsageWindow(provider, now)
+              !exhaustedUsageWindow(provider, now, defaultTextGenerationModel(driver))
             );
           },
           { includeConfiguredInstances: true },

@@ -1,11 +1,12 @@
 import { useAtomValue } from "@effect/atom-react";
-import { useState, type ReactNode } from "react";
+import { Fragment, useState, type ReactNode } from "react";
 import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
 import { AsyncResult } from "effect/reactivity";
 import {
   AuthSettingsWriteScope,
   type DevicePlatform,
+  type DevicePlatformAvailability,
   type DeviceServiceState,
   type EasDeviceHostConfig,
   type EnvironmentId,
@@ -18,7 +19,6 @@ import {
   CloudIcon,
   ContainerIcon,
   HardDriveIcon,
-  LayersIcon,
   MoreVertical,
   PlusIcon,
   ServerIcon,
@@ -30,10 +30,11 @@ import { environmentAtomList, environmentIdsKey } from "../../state/environmentA
 import { serverEnvironment } from "../../state/server";
 import { readEnvironmentScope } from "../../state/session";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { AndroidIcon, AppleIcon } from "../Icons";
 import { Button, InlineButton } from "../ui/button";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
-import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { Spinner } from "../ui/spinner";
 import { toastManager } from "../ui/toast";
 import { DeviceHostEditor } from "./DeviceHostEditor";
 import { updateDeviceHosts, groupDeviceHosts } from "./deviceHostsSettings.logic";
@@ -60,25 +61,27 @@ const deviceHostStatesAtom = environmentAtomList("web-device-host-states", (envi
   deviceEnvironment.state({ environmentId, input: {} }),
 );
 
-const PLATFORM_LABELS: Record<DevicePlatform, string> = { ios: "iOS", android: "Android" };
-
 const failureMessage = (cause: Cause.Cause<unknown>) => {
   const error = Cause.squash(cause);
   return error instanceof Error ? error.message : String(error);
 };
 
-/** How one source stands on one environment. `none` is not a problem: the source is not there. */
+/** Something on one environment that is in progress or needs a fix; a working source has none. */
 interface SourceStatus {
-  readonly tone: "ready" | "pending" | "warning" | "error" | "none";
+  readonly tone: "pending" | "warning" | "error";
   readonly label: string;
   readonly detail?: string | undefined;
   readonly action?: { readonly label: string; readonly run: () => void } | undefined;
 }
 
+/** A source on one environment whose devices are on. */
 interface SourceEnvironment {
   readonly environmentId: EnvironmentId;
   readonly label: string;
-  readonly status: SourceStatus;
+  readonly added: boolean;
+  readonly status?: SourceStatus | undefined;
+  /** Unknown until the environment's hub has reached the source. */
+  readonly platforms?: ReadonlyArray<DevicePlatformAvailability> | undefined;
 }
 
 interface SourceRow {
@@ -100,32 +103,30 @@ type Editing =
   | { readonly kind: "eas"; readonly host: EasDeviceHostConfig; readonly isNew: boolean }
   | { readonly kind: "simlock"; readonly host: SimlockDeviceHostConfig; readonly isNew: boolean };
 
-/**
- * A configured host's status on one environment, from that environment's device state. EAS and
- * Simlock hosts connect on demand, so an idle one is ready; an idle SSH host has not connected yet.
- */
+/** What a configured host is doing on one environment, when it is not simply working. */
 function hostStatus(
   state: DeviceServiceState | undefined,
   hostId: string,
-  onDemand = false,
-): SourceStatus {
+): SourceStatus | undefined {
   if (!state) return { tone: "pending", label: "Loading" };
-  if (state.hostStatus === "disabled") return { tone: "none", label: "Devices off" };
   const status = state.hostStatuses[hostId];
   switch (status?.status) {
     case "ready":
       return status.androidDiscoveryIncomplete
-        ? { tone: "warning", label: "Android list incomplete", detail: status.detail }
-        : { tone: "ready", label: "Ready" };
+        ? { tone: "warning", label: "Android list may be incomplete", detail: status.detail }
+        : undefined;
     case "installing":
     case "starting":
       return { tone: "pending", label: "Starting", detail: status.detail };
     case "failed":
       return { tone: "error", label: "Failed", detail: status.detail };
     default:
-      return { tone: "ready", label: onDemand ? "Ready" : "Not connected yet" };
+      return undefined;
   }
 }
+
+const hostPlatforms = (state: DeviceServiceState | undefined, hostId: string) =>
+  state?.hosts.find((host) => host.id === hostId)?.platforms;
 
 /**
  * Every device source the selected environments can open, one row each. A source configured on
@@ -160,6 +161,8 @@ export function DeviceSourcesSettings(props: {
       state: result ? Option.getOrUndefined(AsyncResult.value(result)) : undefined,
     };
   });
+  // Environments with devices off are left out: the switch above already says so.
+  const active = members.filter((member) => member.settings?.enableDeviceSupport);
   const simlockEnabled = members.some((member) => member.settings?.simlockDeviceHostsEnabled);
   const disconnected = environments.length > connectedEnvironments.length;
   const disabled = projectScope || busy || members.length === 0 || disconnected;
@@ -341,31 +344,28 @@ export function DeviceSourcesSettings(props: {
     icon: <HardDriveIcon className="size-3.5" />,
     title: "Local simulators",
     description:
-      members.length === 1
-        ? platformsSummary(members[0]?.state, "local") || "Runtimes installed on this machine"
-        : localPlatformsAcross(members) || "Runtimes installed on each environment's machine",
-    environments: members.map((member) => {
-      const state = member.state;
-      let status: SourceStatus;
-      if (!state) status = { tone: "pending", label: "Loading" };
-      else if (state.hostStatus === "disabled") status = { tone: "none", label: "Devices off" };
-      else {
-        const local = state.hosts.find((host) => host.kind === "local");
-        const failure = local ? hostStatus(state, local.id) : undefined;
-        status =
-          failure?.tone === "error"
+      members.length > 1
+        ? "Simulators and emulators installed on each environment's own machine."
+        : "Simulators and emulators installed on this environment's machine.",
+    environments: active.map((member) => {
+      const local = member.state?.hosts.find((host) => host.kind === "local");
+      const status = local ? hostStatus(member.state, local.id) : hostStatus(member.state, "");
+      return {
+        environmentId: member.environmentId,
+        label: member.label,
+        added: true,
+        platforms: local?.platforms,
+        status:
+          status?.tone === "error"
             ? {
-                ...failure,
+                ...status,
                 action: {
                   label: "Refresh",
                   run: () => void list({ environmentId: member.environmentId, input: {} }),
                 },
               }
-            : local?.platforms.some((platform) => platform.available)
-              ? { tone: "ready", label: "Ready" }
-              : { tone: "none", label: "No runtimes" };
-      }
-      return { environmentId: member.environmentId, label: member.label, status };
+            : status,
+      };
     }),
   });
 
@@ -392,24 +392,22 @@ export function DeviceSourcesSettings(props: {
       title: host.label,
       kind: "SSH",
       description: host.target,
-      environments: members.map((member) => {
+      environments: active.map((member) => {
         const held = group.members.find(
           (candidate) => candidate.environmentId === member.environmentId,
         );
         if (!held)
-          return {
-            environmentId: member.environmentId,
-            label: member.label,
-            status: { tone: "none", label: "Not added" },
-          };
-        const status: SourceStatus = testing.has(host.id)
-          ? { tone: "pending", label: "Testing connection" }
+          return { environmentId: member.environmentId, label: member.label, added: false };
+        const status = testing.has(host.id)
+          ? ({ tone: "pending", label: "Testing connection" } as const)
           : hostStatus(member.state, held.host.id);
         return {
           environmentId: member.environmentId,
           label: member.label,
+          added: true,
+          platforms: hostPlatforms(member.state, held.host.id),
           status:
-            status.tone === "error" && member.state?.supportsHostRetry
+            status?.tone === "error" && member.state?.supportsHostRetry
               ? {
                   ...status,
                   label: "Can't connect",
@@ -438,15 +436,22 @@ export function DeviceSourcesSettings(props: {
         title: host.label,
         kind: "EAS",
         description: easSessionLimits(host),
-        environments: members.map((member) => ({
-          environmentId: member.environmentId,
-          label: member.label,
-          status: (member.settings?.easDeviceHosts ?? []).some(
+        environments: active.map((member) => {
+          const added = (member.settings?.easDeviceHosts ?? []).some(
             (candidate) => candidate.id === host.id,
-          )
-            ? hostStatus(member.state, host.id, true)
-            : { tone: "none", label: "Not added" },
-        })),
+          );
+          return {
+            environmentId: member.environmentId,
+            label: member.label,
+            added,
+            ...(added
+              ? {
+                  status: hostStatus(member.state, host.id),
+                  platforms: hostPlatforms(member.state, host.id),
+                }
+              : {}),
+          };
+        }),
         actions: rowActions(
           () => setEditing({ kind: "eas", host, isNew: false }),
           () => void saveEas(host, true),
@@ -468,21 +473,26 @@ export function DeviceSourcesSettings(props: {
         title: host.label,
         kind: "Simlock",
         description: `${host.gatewayUrl.replace(/^https?:\/\//, "")} · ${simlockLeaseLimits(host)}`,
-        environments: simlockEnvironments.map((environment) => {
-          const member = members.find(
-            (candidate) => candidate.environmentId === environment.environmentId,
+        environments: active.map((member) => {
+          const held = (member.settings?.simlockDeviceHosts ?? []).find(
+            (candidate) => candidate.id === host.id,
           );
-          const held = environment.hosts.find((candidate) => candidate.id === host.id);
-          const status: SourceStatus = !held
-            ? { tone: "none", label: "Not added" }
-            : held.agentToken === ""
-              ? {
-                  tone: "warning",
-                  label: "No agent token",
-                  action: { label: "Add token", run: edit },
-                }
-              : hostStatus(member?.state, host.id, true);
-          return { environmentId: environment.environmentId, label: environment.label, status };
+          if (!held)
+            return { environmentId: member.environmentId, label: member.label, added: false };
+          return {
+            environmentId: member.environmentId,
+            label: member.label,
+            added: true,
+            platforms: hostPlatforms(member.state, host.id),
+            status:
+              held.agentToken === ""
+                ? ({
+                    tone: "warning",
+                    label: "No agent token",
+                    action: { label: "Add token", run: edit },
+                  } as const)
+                : hostStatus(member.state, host.id),
+          };
         }),
         actions: rowActions(edit, () => removeSimlock(host)),
       });
@@ -580,88 +590,113 @@ export function DeviceSourcesSettings(props: {
   );
 }
 
-function platformsSummary(state: DeviceServiceState | undefined, kind: "local") {
-  const local = state?.hosts.find((host) => host.kind === kind);
-  return (local?.platforms ?? [])
-    .filter((platform) => platform.available)
-    .map((platform) => PLATFORM_LABELS[platform.platform])
-    .join(" · ");
-}
+const PLATFORMS = [
+  { platform: "ios", label: "iOS", Icon: AppleIcon },
+  { platform: "android", label: "Android", Icon: AndroidIcon },
+] as const satisfies ReadonlyArray<{ platform: DevicePlatform; label: string; Icon: unknown }>;
 
-/** "iOS on mbp, macmini · Android on mbp": which machines have which runtimes. */
-function localPlatformsAcross(
-  members: ReadonlyArray<{ label: string; state: DeviceServiceState | undefined }>,
-) {
-  return (["ios", "android"] as const)
-    .flatMap((platform) => {
-      const holders = members.filter((member) =>
-        member.state?.hosts
-          .find((host) => host.kind === "local")
-          ?.platforms.some((candidate) => candidate.platform === platform && candidate.available),
-      );
-      return holders.length > 0
-        ? [`${PLATFORM_LABELS[platform]} on ${holders.map((member) => member.label).join(", ")}`]
-        : [];
-    })
-    .join(" · ");
-}
-
-const DOT_CLASSES: Record<SourceStatus["tone"], string> = {
-  ready: "bg-success",
-  pending: "bg-muted-foreground animate-none",
-  warning: "bg-warning",
-  error: "bg-destructive",
-  none: "bg-muted-foreground/50",
-};
-
-function StatusDot(props: { tone: SourceStatus["tone"] }) {
-  return (
-    <span
-      aria-hidden
-      className={cn("inline-block size-1.5 shrink-0 rounded-full", DOT_CLASSES[props.tone])}
-    />
+/**
+ * The platforms a source offers, as icons. An icon is dimmed where no environment has the
+ * platform and carries a warning mark where only some do; hovering shows each environment.
+ */
+function SourcePlatforms(props: { title: string; environments: ReadonlyArray<SourceEnvironment> }) {
+  const added = props.environments.filter((environment) => environment.added);
+  const known = added.filter((environment) => environment.platforms !== undefined);
+  const shown = PLATFORMS.filter(({ platform }) =>
+    known.some((environment) =>
+      environment.platforms?.some((candidate) => candidate.platform === platform),
+    ),
   );
-}
-
-/** One status for the row: the shared one, or how many of the environments that have it are ready. */
-function summarize(environments: ReadonlyArray<SourceEnvironment>): SourceStatus {
-  const present = environments.filter((environment) => environment.status.tone !== "none");
-  const first = environments[0]?.status;
-  if (first && environments.every((environment) => environment.status.label === first.label))
-    return first;
-  if (present.length === 0)
-    return { tone: "none", label: environments.length > 0 ? "Off" : "None" };
-  const ready = present.filter((environment) => environment.status.tone === "ready").length;
-  const tone = present.some((environment) => environment.status.tone === "error")
-    ? "error"
-    : present.some((environment) => environment.status.tone === "warning")
-      ? "warning"
-      : present.some((environment) => environment.status.tone === "pending")
-        ? "pending"
-        : "ready";
-  return {
-    tone,
-    label:
-      ready === present.length ? `Ready on ${ready}` : `Ready on ${ready} of ${present.length}`,
-  };
+  if (shown.length === 0) return null;
+  const availableOn = (platform: DevicePlatform) =>
+    known.filter((environment) =>
+      environment.platforms?.some(
+        (candidate) => candidate.platform === platform && candidate.available,
+      ),
+    ).length;
+  const several = props.environments.length > 1;
+  return (
+    <Popover>
+      <PopoverTrigger
+        openOnHover
+        delay={150}
+        closeDelay={100}
+        render={
+          <button
+            type="button"
+            aria-label={`${props.title}: ${shown
+              .map(
+                ({ platform, label }) => `${label} on ${availableOn(platform)} of ${known.length}`,
+              )
+              .join(", ")}. Show each environment`}
+            className="flex shrink-0 items-center gap-2 rounded-md px-1 py-0.5 text-muted-foreground outline-hidden hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+          />
+        }
+      >
+        {shown.map(({ platform, Icon }) => {
+          const count = availableOn(platform);
+          return (
+            <span key={platform} className={cn("relative", count === 0 && "opacity-40")}>
+              <Icon className={cn("size-3.5", platform === "ios" && "-translate-y-px")} />
+              {count > 0 && count < known.length ? (
+                <span
+                  aria-hidden
+                  className="absolute -top-0.5 -right-1 size-1.5 rounded-full bg-warning ring-2 ring-background"
+                />
+              ) : null}
+            </span>
+          );
+        })}
+      </PopoverTrigger>
+      <PopoverPopup align="end" width="md" padding="none">
+        <div className="divide-y divide-border/60">
+          {props.environments.map((environment) => (
+            <section key={environment.environmentId} className="px-3 py-2.5">
+              {several ? (
+                <h4 className="pb-1 text-xs font-medium text-muted-foreground">
+                  {environment.label}
+                </h4>
+              ) : null}
+              {!environment.added ? (
+                <p className="text-xs text-muted-foreground">Not added here</p>
+              ) : !environment.platforms ? (
+                <p className="text-xs text-muted-foreground">Not reached yet</p>
+              ) : (
+                <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
+                  {PLATFORMS.map(({ platform, label }) => {
+                    const availability = environment.platforms?.find(
+                      (candidate) => candidate.platform === platform,
+                    );
+                    return (
+                      <Fragment key={platform}>
+                        <dt className="text-muted-foreground">{label}</dt>
+                        <dd className={availability?.available ? "" : "text-muted-foreground"}>
+                          {availability?.available
+                            ? "Available"
+                            : (availability?.reason ?? "Not available")}
+                        </dd>
+                      </Fragment>
+                    );
+                  })}
+                </dl>
+              )}
+            </section>
+          ))}
+        </div>
+      </PopoverPopup>
+    </Popover>
+  );
 }
 
 function DeviceSourceRow(props: { row: SourceRow }) {
   const { row } = props;
   const several = row.environments.length > 1;
-  const summary = summarize(row.environments);
-  const differs =
-    several && new Set(row.environments.map((environment) => environment.status.label)).size > 1;
-  // Problems get a line of their own, with the fix beside them.
-  const problems = row.environments.filter(
-    (environment) => environment.status.tone === "error" || environment.status.tone === "warning",
+  const issues = row.environments.filter(
+    (environment): environment is SourceEnvironment & { status: SourceStatus } =>
+      environment.status !== undefined,
   );
-  const groups = new Map<string, SourceEnvironment[]>();
-  for (const environment of row.environments)
-    groups.set(environment.status.label, [
-      ...(groups.get(environment.status.label) ?? []),
-      environment,
-    ]);
+  const problems = issues.filter((environment) => environment.status.tone !== "pending");
+  const pending = issues.find((environment) => environment.status.tone === "pending");
   return (
     <div className="flex items-center gap-3 border-t border-border/60 px-4 py-3 first:border-t-0 sm:px-5">
       <span className="grid size-7 shrink-0 place-items-center rounded-md bg-secondary text-muted-foreground">
@@ -675,60 +710,20 @@ function DeviceSourceRow(props: { row: SourceRow }) {
               {row.kind}
             </span>
           ) : null}
-          {differs ? (
-            <Popover>
-              <Tooltip>
-                <TooltipTrigger
-                  render={
-                    <PopoverTrigger
-                      render={
-                        <Button
-                          size="icon-micro"
-                          variant="ghost-muted"
-                          aria-label="Differs across environments. Show each environment"
-                        />
-                      }
-                    />
-                  }
-                >
-                  <LayersIcon className="size-3 text-warning" />
-                </TooltipTrigger>
-                <TooltipPopup side="top">Differs across environments</TooltipPopup>
-              </Tooltip>
-              <PopoverPopup align="start" width="md" padding="none">
-                <div className="divide-y divide-border/60">
-                  {[...groups.entries()].map(([status, environments]) => (
-                    <section key={status} className="px-3 py-2.5">
-                      <h4 className="pb-1 text-xs font-medium text-muted-foreground">
-                        {environments.map((environment) => environment.label).join(" · ")}
-                      </h4>
-                      <p className="flex items-center gap-1.5 text-sm">
-                        <StatusDot tone={environments[0]!.status.tone} />
-                        {status}
-                      </p>
-                      {environments[0]?.status.detail ? (
-                        <p className="mt-1 whitespace-pre-line break-words text-xs text-muted-foreground">
-                          {environments[0].status.detail}
-                        </p>
-                      ) : null}
-                    </section>
-                  ))}
-                </div>
-              </PopoverPopup>
-            </Popover>
-          ) : null}
         </div>
         <p className="truncate text-xs text-muted-foreground">{row.description}</p>
         {problems.map((environment) => (
           <p
             key={environment.environmentId}
             role="status"
-            className="mt-1 flex flex-wrap items-center gap-1.5 text-xs"
+            className={cn(
+              "mt-1 flex flex-wrap items-center gap-1.5 text-xs",
+              environment.status.tone === "error" ? "text-destructive" : "text-warning",
+            )}
           >
-            <StatusDot tone={environment.status.tone} />
             <span className="min-w-0 break-words">
               {several ? `${environment.label}: ` : ""}
-              {environment.status.detail && !several
+              {!several && environment.status.detail
                 ? environment.status.detail
                 : environment.status.label}
             </span>
@@ -740,10 +735,17 @@ function DeviceSourceRow(props: { row: SourceRow }) {
           </p>
         ))}
       </div>
-      <span className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
-        <StatusDot tone={summary.tone} />
-        {summary.label}
-      </span>
+      {pending ? (
+        <span
+          role="status"
+          className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground"
+        >
+          <Spinner size="xs" />
+          {pending.status.label}
+        </span>
+      ) : (
+        <SourcePlatforms title={row.title} environments={row.environments} />
+      )}
       {row.actions ? <div className="flex shrink-0 items-center gap-1">{row.actions}</div> : null}
     </div>
   );

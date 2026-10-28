@@ -19,6 +19,7 @@ import {
   ProviderInstanceId,
   ProviderThreadId,
   ProviderTurnId,
+  type ServerProvider,
   RunAttemptId,
   RunId,
   RuntimeRequestId,
@@ -32,6 +33,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Ref from "effect/Ref";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlError from "effect/sql/SqlError";
 import * as Stream from "effect/Stream";
@@ -46,6 +48,11 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
+import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
+import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
+import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
+import { makeManagedServerProvider } from "@t3tools/provider-core/server/managedProvider";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import {
   makeProviderEventRoutingState,
@@ -68,8 +75,16 @@ const layerGit = GitVcsDriver.layer.pipe(
   Layer.provideMerge(NodeServices.layer),
 );
 
-const makeLayerTest = <E>(ingestorEventSink: Layer.Layer<EventSink.EventSinkV2, E>) =>
+const layerEmptyInstances = Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({
+  // @effect-diagnostics-next-line effectSucceedWithVoid:off - Optional instances require undefined rather than void.
+  getInstance: () => Effect.succeed(undefined),
+});
+const makeLayerTest = <E>(
+  ingestorEventSink: Layer.Layer<EventSink.EventSinkV2, E>,
+  instances = layerEmptyInstances,
+) =>
   Layer.mergeAll(
+    instances,
     layerTestDatabase,
     layerTestStores,
     layerTestEventSink,
@@ -79,6 +94,7 @@ const makeLayerTest = <E>(ingestorEventSink: Layer.Layer<EventSink.EventSinkV2, 
     ProviderEventIngestor.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          instances,
           layerTestStores,
           ingestorEventSink,
           IdAllocator.layer,
@@ -216,6 +232,156 @@ function threadCreatedEvent(
 }
 
 const layer = it.layer(layerTest);
+
+it.effect("refreshes the failing instance snapshot after a committed usage_limit terminal", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const probeSnapshot = yield* Ref.make<ServerProvider>({
+        instanceId: ProviderInstanceId.make("cursor-work"),
+        driver: ProviderDriverKind.make("cursor"),
+        enabled: true,
+        installed: true,
+        version: null,
+        status: "ready",
+        auth: { status: "authenticated" },
+        checkedAt: "2026-04-10T00:00:00.000Z",
+        models: [],
+        slashCommands: [],
+        skills: [],
+        usageLimits: {
+          checkedAt: "2026-04-10T00:00:00.000Z",
+          windows: [{ id: "apiPercentUsed", kind: "monthly", label: "API", usedPercent: 20 }],
+        },
+      });
+      const snapshot = yield* makeManagedServerProvider({
+        resolveMaintenance: () => Effect.die("usage refresh must not resolve maintenance"),
+        getSettings: Effect.succeed({ enabled: true }),
+        streamSettings: Stream.empty,
+        haveSettingsChanged: () => false,
+        initialSnapshot: () => Ref.get(probeSnapshot),
+        checkProvider: Ref.get(probeSnapshot),
+        refreshInterval: "1 hour",
+        refreshOnInterval: false,
+      }).pipe(
+        Effect.provide(
+          Layer.mock(ProviderHost.ProviderHost)({
+            resolveAttachmentPath: () => null,
+            paths: {
+              cwd: "/test",
+              baseDir: "/test",
+              stateDir: "/test/state",
+              providerStatusCacheDir: "/test/cache",
+              attachmentsDir: "/test/attachments",
+            },
+            settings: {
+              get: Effect.die("unused"),
+              withSnapshot: () => Effect.die("unused"),
+              changes: Stream.empty,
+              subscribe: Effect.succeed(Stream.empty),
+            },
+          }),
+        ),
+      );
+      yield* snapshot.streamChanges.pipe(Stream.take(1), Stream.runDrain);
+      assert.equal((yield* snapshot.getSnapshot).usageLimits?.windows[0]?.usedPercent, 20);
+      yield* Ref.update(probeSnapshot, (current): ServerProvider => ({
+        ...current,
+        usageLimits: {
+          checkedAt: "2026-04-10T00:01:00.000Z",
+          windows: [{ id: "apiPercentUsed", kind: "monthly", label: "API", usedPercent: 100 }],
+        },
+      }));
+      const refreshed = yield* snapshot.streamChanges.pipe(
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkChild({ startImmediately: true }),
+      );
+      const adapter = yield* ProviderAdapter.ProviderAdapterV2.pipe(
+        Effect.provide(
+          Layer.mock(ProviderAdapter.ProviderAdapterV2)({
+            instanceId: ProviderInstanceId.make("cursor-work"),
+            driver: ProviderDriverKind.make("cursor"),
+          }),
+        ),
+      );
+      const instance: ProviderInstance = {
+        instanceId: ProviderInstanceId.make("cursor-work"),
+        driverKind: ProviderDriverKind.make("cursor"),
+        continuationIdentity: {
+          driverKind: ProviderDriverKind.make("cursor"),
+          continuationKey: "work",
+        },
+        enabled: true,
+        displayName: undefined,
+        orchestrationAdapter: adapter,
+        textGeneration: {
+          generateBranchName: () => Effect.die("unused"),
+          generateCommitMessage: () => Effect.die("unused"),
+          generatePrContent: () => Effect.die("unused"),
+          generateThreadTitle: () => Effect.die("unused"),
+          generateReviewGuide: () => Effect.die("unused"),
+        },
+        snapshot,
+      };
+      const lookups: ProviderInstanceId[] = [];
+      const instances = Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({
+        getInstance: (id) =>
+          Effect.sync(() => {
+            lookups.push(id);
+            return id === instance.instanceId ? instance : undefined;
+          }),
+      });
+      yield* Effect.gen(function* () {
+        const now = yield* DateTime.now;
+        const eventSink = yield* EventSink.EventSinkV2;
+        const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const threadEvent = yield* threadCreatedEvent(now);
+        yield* eventSink.write({ events: [threadEvent] });
+        const input = {
+          providerSessionId: yield* idAllocator.allocate.providerSession({
+            providerInstanceId: instance.instanceId,
+            threadId: threadEvent.threadId,
+          }),
+          providerInstanceId: instance.instanceId,
+          threadId: threadEvent.threadId,
+        };
+        for (const failureClass of ["validation_error", "usage_limit"] as const) {
+          const stored = yield* ingestor.ingestNormalized({
+            ...input,
+            event: {
+              type: "turn.terminal",
+              driver: instance.driverKind,
+              providerThreadId: idAllocator.derive.providerThread({
+                driver: instance.driverKind,
+                nativeThreadId: "limited",
+              }),
+              providerTurnId: idAllocator.derive.providerTurn({
+                driver: instance.driverKind,
+                nativeTurnId: failureClass,
+              }),
+              runOrdinal: 1,
+              failureItemOrdinal: 1,
+              status: "failed",
+              failure: makeProviderFailure({
+                class: failureClass,
+                message: "Provider rejected turn.",
+              }),
+              threadDisposition: "reusable",
+            },
+          });
+          assert.equal(stored.length, 1);
+          if (failureClass === "validation_error") assert.deepEqual(lookups, []);
+        }
+        assert.deepEqual(lookups, [instance.instanceId]);
+        const [published] = yield* Fiber.join(refreshed);
+        assert.equal(published?.instanceId, instance.instanceId);
+        assert.equal(published?.usageLimits?.windows[0]?.usedPercent, 100);
+        assert.equal((yield* snapshot.getSnapshot).usageLimits?.windows[0]?.usedPercent, 100);
+      }).pipe(Effect.provide(makeLayerTest(layerTestEventSink, instances)));
+    }),
+  ),
+);
 
 it.effect("records accepted billed turn usage once without billing the context window", () => {
   const recorded: Array<Readonly<Record<string, unknown>>> = [];

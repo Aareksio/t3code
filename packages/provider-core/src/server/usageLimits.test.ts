@@ -21,6 +21,27 @@ const weekly = {
 const published = { checkedAt, windows: [session, weekly] };
 
 describe("applyUsageLimitsUpdate", () => {
+  it("merges overage permission without windows and preserves it on sparse updates", () => {
+    const allowed = applyUsageLimitsUpdate({
+      previous: published,
+      checkedAt,
+      update: { windows: [], overageAllowed: true },
+    });
+    expect(allowed).toEqual({ ...published, overageAllowed: true });
+    const updated = applyUsageLimitsUpdate({
+      previous: allowed,
+      checkedAt,
+      update: { windows: [{ ...weekly, usedPercent: 100 }] },
+    });
+    expect(updated?.overageAllowed).toBe(true);
+    expect(
+      applyUsageLimitsUpdate({
+        previous: updated,
+        checkedAt,
+        update: { windows: [], overageAllowed: false },
+      })?.overageAllowed,
+    ).toBe(false);
+  });
   it("returns the published object itself when no window moved", () => {
     const next = applyUsageLimitsUpdate({
       previous: published,
@@ -86,6 +107,7 @@ describe("resolveUsageLimitsAfterProbe", () => {
   it("uses read order for windows while taking metadata from the successful probe", () => {
     const live = {
       checkedAt: "2026-09-03T12:00:05.000Z",
+      overageAllowed: true,
       windows: [
         { ...session, usedPercent: 95 },
         { ...weekly, usedPercent: 70 },
@@ -95,6 +117,7 @@ describe("resolveUsageLimitsAfterProbe", () => {
     };
     const probed = {
       ...published,
+      overageAllowed: false,
       windows: [{ ...session, usedPercent: 0 }],
       resetCredits: { availableCount: 1 },
       externalUsage: { label: "Usage dashboard", url: "https://example.com/usage" },
@@ -104,6 +127,7 @@ describe("resolveUsageLimitsAfterProbe", () => {
       ...probed,
       checkedAt: live.checkedAt,
       windows: live.windows,
+      overageAllowed: true,
     });
 
     const sameTime = { ...probed, checkedAt: live.checkedAt };

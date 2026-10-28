@@ -26,6 +26,7 @@ export function exhaustedUsageWindow(
   now: number,
   model?: string,
 ) {
+  if (provider?.driver === "claudeAgent" && provider.usageLimits?.overageAllowed === true) return;
   const exhausted = (provider?.usageLimits?.windows ?? []).filter(
     (window) =>
       window.usedPercent !== undefined &&

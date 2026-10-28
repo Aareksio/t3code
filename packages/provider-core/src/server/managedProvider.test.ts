@@ -138,6 +138,67 @@ const enrichedSnapshotSecond: ServerProvider = {
 };
 
 describe("makeManagedServerProvider", () => {
+  it.effect("refreshes usage on demand and skips probes already in flight or unsupported", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const calls = yield* Ref.make(0);
+        const probeStarted = yield* Deferred.make<void>();
+        const releaseProbe = yield* Deferred.make<void>();
+        const limits = {
+          checkedAt: "2026-04-10T00:00:01.000Z",
+          windows: [{ id: "five_hour", kind: "session", label: "Session", usedPercent: 100 }],
+        } as const;
+        const probeSnapshot = yield* Ref.make<ServerProvider>({
+          ...refreshedSnapshotSecond,
+          usageLimits: { ...limits, checkedAt: "2026-04-10T00:00:03.000Z" },
+        });
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          resolveMaintenance: () => Effect.die("usage refresh must not resolve maintenance"),
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.empty,
+          haveSettingsChanged: () => false,
+          initialSnapshot: () => Effect.succeed({ ...initialSnapshot, usageLimits: limits }),
+          checkProvider: Ref.updateAndGet(calls, (count) => count + 1).pipe(
+            Effect.flatMap((count) =>
+              count === 1
+                ? Effect.succeed({
+                    ...refreshedSnapshot,
+                    usageLimits: {
+                      ...limits,
+                      windows: [{ ...limits.windows[0], usedPercent: 20 }],
+                    },
+                  })
+                : Deferred.succeed(probeStarted, undefined).pipe(
+                    Effect.andThen(Deferred.await(releaseProbe)),
+                    Effect.andThen(Ref.get(probeSnapshot)),
+                  ),
+            ),
+          ),
+          refreshOnInterval: false,
+        });
+        yield* provider.streamChanges.pipe(Stream.take(1), Stream.runDrain);
+        assert.strictEqual((yield* provider.getSnapshot).usageLimits?.windows[0]?.usedPercent, 20);
+        const refresh = yield* provider.refreshUsage!.pipe(Effect.forkChild);
+        yield* Deferred.await(probeStarted);
+        yield* provider.refreshUsage!;
+        assert.strictEqual(yield* Ref.get(calls), 2);
+        yield* Deferred.succeed(releaseProbe, undefined);
+        yield* Fiber.join(refresh);
+        assert.strictEqual((yield* provider.getSnapshot).usageLimits?.windows[0]?.usedPercent, 100);
+        yield* Ref.set(probeSnapshot, {
+          ...refreshedSnapshotSecond,
+          usageLimits: { ...limits, windows: [], unavailable: { reason: "unsupported" } },
+        });
+        yield* provider.refreshUsage!;
+        assert.strictEqual(
+          (yield* provider.getSnapshot).usageLimits?.unavailable?.reason,
+          "unsupported",
+        );
+        yield* provider.refreshUsage!;
+        assert.strictEqual(yield* Ref.get(calls), 3);
+      }),
+    ).pipe(Effect.provide(layerAlwaysRunTest)),
+  );
   it.effect(
     "runs the initial provider check in the background and streams the refreshed snapshot",
     () =>

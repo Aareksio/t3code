@@ -21,6 +21,7 @@ import {
   paceRemainingPercent,
   usesChatGptSharing,
   resolveNewThreadModelSelection,
+  exhaustedUsageWindow,
 } from "./usageLimits.ts";
 
 const now = Date.parse("2026-09-03T12:00:00.000Z");
@@ -52,6 +53,30 @@ function provider(overrides: Partial<ServerProvider>): ServerProvider {
 }
 
 describe("new thread model fallback", () => {
+  it("keeps Claude usable while overage is allowed", () => {
+    const claude = provider({
+      driver: ProviderDriverKind.make("claudeAgent"),
+      usageLimits: {
+        checkedAt: "2026-09-03T11:00:00.000Z",
+        windows: [{ ...window, usedPercent: 100 }],
+        overageAllowed: true,
+      },
+    });
+    expect(exhaustedUsageWindow(claude, now, "claude-fable-5-1")).toBeUndefined();
+    expect(exhaustedUsageWindow(claude, now)).toBeUndefined();
+    for (const overageAllowed of [false, undefined]) {
+      expect(
+        exhaustedUsageWindow(
+          { ...claude, usageLimits: { ...claude.usageLimits!, overageAllowed } },
+          now,
+          "claude-fable-5-1",
+        ),
+      ).toBeDefined();
+    }
+    expect(
+      exhaustedUsageWindow({ ...claude, driver: ProviderDriverKind.make("codex") }, now),
+    ).toBeDefined();
+  });
   const selection = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-6.1-sol" };
   const fallback = { instanceId: ProviderInstanceId.make("claude"), model: "claude-fable-5-1" };
   const limited = provider({

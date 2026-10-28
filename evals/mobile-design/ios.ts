@@ -369,11 +369,12 @@ export class Simulator {
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const snapshot = await this.snapshot();
       // A thread's back button is labelled with the tab it returns to, so only count it up top.
-      // The iPad sidebar's section footer "Back" is not a button, so accept it by label alone.
+      // The iPad sidebar footer's "Back" and a sheet's dimmed backdrop are not buttons, so accept
+      // them by label alone.
       const back = snapshot.nodes.find(
         (node) =>
-          (node.kind === "button" || node.label === "Back") &&
-          (/^(Back|Close|Done|Cancel|Go to threads list|Back to chat|Return to chat)$/.test(
+          (node.kind === "button" || /^(Back|dismiss popup)$/.test(node.label ?? "")) &&
+          (/^(Back|Close|Done|Cancel|dismiss popup|Go to threads list|Back to chat|Return to chat)$/.test(
             node.label ?? "",
           ) ||
             // A pushed page's back button is named after the list it returns to.
@@ -394,9 +395,14 @@ export class Simulator {
           node.label === "Chats" &&
           (node.rect?.y ?? 0) >= snapshot.viewport.height / 4,
       );
-      if (back) await this.press(back);
-      else if (chatsTab) await this.press(chatsTab);
-      else await this.agent(["back"]).catch(() => undefined);
+      const target = back ?? chatsTab;
+      if (target) {
+        await this.withUsableTaps(async () => {
+          // A turn to portrait moves the element, so find it again by its label.
+          const label = new RegExp(`^${RegExp.escape(target.label ?? "")}$`);
+          await this.press(this.find(await this.snapshot(), label) ?? target);
+        });
+      } else await this.agent(["back"]).catch(() => undefined);
       await delay(1_000);
     }
     // Some screens offer no way back that works, such as an iPad sidebar section opened by a

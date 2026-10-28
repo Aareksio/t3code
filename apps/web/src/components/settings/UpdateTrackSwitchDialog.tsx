@@ -89,6 +89,7 @@ function SwitchPlan({
       connected: environment.connection.phase === "connected",
       databaseMigration: environment.serverConfig?.environment.databaseMigration,
     })),
+    window.desktopBridge?.getLocalEnvironmentBootstraps().length ?? 0,
   );
 
   const run = async () => {

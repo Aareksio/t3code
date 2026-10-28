@@ -193,21 +193,26 @@ describe("localSwitchBlockReason", () => {
     const stable = { channel: "latest" as const, version: "0.1.3", databaseMigration: 69 };
     const nightly = "0.1.4-nightly.20261027.3796";
 
-    expect(
-      localSwitchBlockReason(nightly, stable, [{ connected: true, databaseMigration: 69 }]),
-    ).toBeNull();
+    const windows = { connected: true, databaseMigration: 69 };
+    expect(localSwitchBlockReason(nightly, stable, [windows], 1)).toBeNull();
     // A WSL server's newer migration blocks the reinstall that would restart it.
     expect(
-      localSwitchBlockReason(nightly, stable, [
-        { connected: true, databaseMigration: 69 },
-        { connected: true, databaseMigration: 72 },
-      ]),
+      localSwitchBlockReason(
+        nightly,
+        stable,
+        [windows, { connected: true, databaseMigration: 72 }],
+        2,
+      ),
     ).toContain("does not support yet");
+    // A WSL backend still starting has no client entry, so its database is unchecked.
+    expect(localSwitchBlockReason(nightly, stable, [windows], 2)).toBe(
+      "its server is not connected, so its database cannot be checked",
+    );
     // A cached head from a disconnected server proves nothing.
     expect(
-      localSwitchBlockReason(nightly, stable, [{ connected: false, databaseMigration: 69 }]),
+      localSwitchBlockReason(nightly, stable, [{ connected: false, databaseMigration: 69 }], 1),
     ).toBe("its server is not connected, so its database cannot be checked");
-    expect(localSwitchBlockReason("0.1.3", stable, [])).toBeNull();
+    expect(localSwitchBlockReason("0.1.3", stable, [], 1)).toBeNull();
   });
 });
 

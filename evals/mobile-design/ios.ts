@@ -348,9 +348,10 @@ export class Simulator {
     for (let attempt = 0; attempt < 8; attempt += 1) {
       const snapshot = await this.snapshot();
       // A thread's back button is labelled with the tab it returns to, so only count it up top.
+      // The iPad sidebar's section footer "Back" is not a button, so accept it by label alone.
       const back = snapshot.nodes.find(
         (node) =>
-          node.kind === "button" &&
+          (node.kind === "button" || node.label === "Back") &&
           (/^(Back|Close|Done|Cancel|Go to threads list|Back to chat|Return to chat)$/.test(
             node.label ?? "",
           ) ||

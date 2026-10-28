@@ -31,7 +31,11 @@ export function recordedMigrations(
   } catch {
     return null;
   } finally {
-    db.close();
+    try {
+      db.close();
+    } catch {
+      // A read-only handle has nothing to flush; the result above already stands.
+    }
   }
 }
 

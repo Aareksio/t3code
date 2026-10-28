@@ -153,11 +153,9 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
   const update: ServerSelfUpdate["Service"]["update"] = Effect.fn(
     "cloud.server_self_update.update",
   )(function* (input, reportProgress = () => Effect.void, onHandoffAccepted = () => Effect.void) {
-    const unsafeDowngrade = crossesTrackUnsafely(input);
     if (capability === "desktop-managed") {
-      if (input.channel !== undefined && unsafeDowngrade !== null) {
-        return yield* failWith(unsafeDowngrade);
-      }
+      const unsafeCrossing = input.channel === undefined ? null : crossesTrackUnsafely(input);
+      if (unsafeCrossing !== null) return yield* failWith(unsafeCrossing);
       if (desktopAppUpdate.available) {
         return yield* desktopAppUpdate.run(
           reportProgress,
@@ -176,7 +174,8 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
       );
     }
 
-    if (unsafeDowngrade !== null) return yield* failWith(unsafeDowngrade);
+    const unsafeCrossing = crossesTrackUnsafely(input);
+    if (unsafeCrossing !== null) return yield* failWith(unsafeCrossing);
     const targetVersion = input.targetVersion.trim();
     if (!isExactServiceVersion(targetVersion)) {
       return yield* failWith(`'${targetVersion}' is not an exact t3 version.`);

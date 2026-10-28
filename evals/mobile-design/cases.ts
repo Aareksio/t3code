@@ -297,7 +297,8 @@ export const FLOWS = [
     source: REQUEST,
     steps: [
       { tap: "^(New chat|New thread)$" },
-      { tap: "^T3 Code$" },
+      // New thread can open straight onto the project picker.
+      { tap: "^T3 Code$", skipIf: "^Choose project$" },
       { tap: "^React$" },
       { tap: "^Choose environment" },
       // Pick whichever machine the picker offers; when it is not the project's, the frames show it.
@@ -325,8 +326,13 @@ export const FLOWS = [
     source: REQUEST,
     steps: [
       { tap: "^Make remote coding feel local" },
-      { tap: ["^Changes [+]", "^(Git|Panel|Toggle panel)$"] },
-      { tap: "^(Review changes|Diff$)", skipIf: "^Select diff$" },
+      // A crowded header folds its buttons into a More menu.
+      { tap: ["^Changes [+]", "^(Git|Panel|Toggle panel)$", "^More$"] },
+      {
+        tap: ["^Changes [+]", "^(Review changes|Diff$)", "^(Panel|Toggle panel)$"],
+        skipIf: "^Select diff$",
+      },
+      { tap: "^Diff$", optional: true, skipIf: "^Select diff$" },
     ],
   },
   {

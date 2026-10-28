@@ -23,11 +23,14 @@ export const getUpdateState = DesktopIpc.makeIpcMethod({
 
 export const setUpdateChannel = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.UPDATE_SET_CHANNEL_CHANNEL,
-  payload: DesktopUpdateChannelSchema,
+  payload: Schema.Struct({
+    channel: DesktopUpdateChannelSchema,
+    minimumVersion: Schema.optional(Schema.String),
+  }),
   result: DesktopUpdateStateSchema,
-  handler: Effect.fn("desktop.ipc.updates.setChannel")(function* (channel) {
+  handler: Effect.fn("desktop.ipc.updates.setChannel")(function* ({ channel, minimumVersion }) {
     const updates = yield* DesktopUpdates.DesktopUpdates;
-    return yield* updates.setChannel(channel);
+    return yield* updates.setChannel(channel, { minimumVersion });
   }),
 });
 

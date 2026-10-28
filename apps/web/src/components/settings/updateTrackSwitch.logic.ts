@@ -20,8 +20,11 @@ export async function prepareLocalTrackSwitch(
 > {
   let local: DesktopUpdateState;
   try {
-    // A build on another track always re-checks the feed, with older releases allowed.
-    local = await bridge.setUpdateChannel(input.channel);
+    // A build on another track re-checks the feed, older releases allowed down to the checked one.
+    local = await bridge.setUpdateChannel(
+      input.channel,
+      input.reinstall ? input.version : undefined,
+    );
   } catch (error) {
     return {
       ok: false,

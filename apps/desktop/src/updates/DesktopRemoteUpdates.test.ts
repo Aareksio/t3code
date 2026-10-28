@@ -149,38 +149,45 @@ describe("DesktopRemoteUpdates", () => {
     );
   });
 
-  it.effect("refuses a crossing whose feed offers only an older build, and keeps the track", () => {
-    const harness = makeHarness({ beforeSetUpdateChannel: Effect.void });
+  it.effect(
+    "refuses a crossing whose feed has only an older build, and never offers it later",
+    () => {
+      const harness = makeHarness({ beforeSetUpdateChannel: Effect.void });
 
-    return runRemoteUpdatesTest(harness, ({ reports, requests }) =>
-      Effect.gen(function* () {
-        const updates = yield* DesktopUpdates.DesktopUpdates;
-        const older = "1.2.4-nightly.20261020.1";
-        yield* Queue.offer(requests, {
-          ...request("req-older"),
-          channel: "nightly",
-          targetVersion: "1.2.4-nightly.20261027.1",
-        });
-        yield* settle;
-        // The first offer triggers this request's own check; the refusal follows if it agrees.
-        harness.emit("update-available", { version: older });
-        yield* settle;
-        assert.deepEqual(terminalReports(reports), []);
-        harness.emit("update-available", { version: older });
-        yield* settle;
+      return runRemoteUpdatesTest(harness, ({ reports, requests }) =>
+        Effect.gen(function* () {
+          const updates = yield* DesktopUpdates.DesktopUpdates;
+          const older = "1.2.4-nightly.20261020.1";
+          yield* Queue.offer(requests, {
+            ...request("req-older"),
+            channel: "nightly",
+            targetVersion: "1.2.4-nightly.20261027.1",
+          });
+          yield* settle;
+          // Answers the track change's check, then the request's own check.
+          harness.emit("update-available", { version: older });
+          yield* settle;
+          harness.emit("update-available", { version: older });
+          yield* settle;
 
-        const terminals = terminalReports(reports);
-        assert.deepEqual(
-          terminals.map((report) => report.outcome),
-          ["failed"],
-        );
-        assert.include(terminals[0]?.reason ?? "", `found ${older}`);
-        assert.equal(harness.downloadCount(), 0);
-        // The saved track is the user's intent; a retry picks it up from here.
-        assert.equal((yield* updates.getState).channel, "nightly");
-      }),
-    );
-  });
+          assert.deepEqual(
+            terminalReports(reports).map((report) => [report.outcome, report.reason]),
+            [["failed", "The desktop app found no build of 1.2.4-nightly.20261027.1."]],
+          );
+          // The saved track is the user's intent; a retry picks it up from here.
+          assert.equal((yield* updates.getState).channel, "nightly");
+
+          // A plain update afterwards cannot reach the build the switch refused.
+          yield* Queue.offer(requests, request("req-plain"));
+          yield* settle;
+          harness.emit("update-available", { version: older });
+          yield* settle;
+          assert.isNull((yield* updates.getState).availableVersion);
+          assert.equal(harness.downloadCount(), 0);
+        }),
+      );
+    },
+  );
 
   it.effect("only saves the track on a host already running the release", () => {
     const harness = makeHarness({ savedChannel: "nightly" });

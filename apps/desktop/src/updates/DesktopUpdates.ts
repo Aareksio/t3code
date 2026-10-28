@@ -36,6 +36,7 @@ import * as IpcChannels from "../ipc/channels.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import { normalizeDesktopUpdateReleaseNotes } from "./releaseNotes.ts";
 import { desktopUpdateChannelOf } from "@t3tools/shared/cliRelease";
+import { compareSemverVersions } from "@t3tools/shared/semver";
 import {
   createInitialDesktopUpdateState,
   reduceDesktopUpdateStateOnCheckFailure,
@@ -182,8 +183,10 @@ export class DesktopUpdates extends Context.Service<
     readonly emitState: Effect.Effect<void>;
     readonly disabledReason: Effect.Effect<Option.Option<string>>;
     readonly configure: Effect.Effect<void, never, Scope.Scope>;
+    /** `minimumVersion` is a track switch's checked release; nothing older is offered after. */
     readonly setChannel: (
       channel: DesktopUpdateChannel,
+      options?: { readonly minimumVersion?: string | undefined },
     ) => Effect.Effect<DesktopUpdateState, DesktopUpdateSetChannelError>;
     /** `allowDowngrade` is for a guarded track switch, which checked that older release. */
     readonly check: (
@@ -358,6 +361,17 @@ export const make = Effect.gen(function* () {
   const updaterConfiguredRef = yield* Ref.make(false);
   const lastLoggedDownloadMilestoneRef = yield* Ref.make(-1);
   const notAppliedVersionRef = yield* Ref.make(Option.none<string>());
+  // The release a track switch's database check cleared. While set, nothing older is offered, so a
+  // refused switch cannot leave an unchecked build for the pill or a plain update to install.
+  const releaseFloorRef = yield* Ref.make(Option.none<string>());
+  const offerable = (version: string, state: DesktopUpdateState) =>
+    Ref.get(releaseFloorRef).pipe(
+      Effect.map(
+        (floor) =>
+          desktopUpdateChannelOf(version) === state.channel &&
+          (Option.isNone(floor) || compareSemverVersions(version, floor.value) >= 0),
+      ),
+    );
   const updateStateRef = yield* Ref.make<DesktopUpdateState>(
     createInitialDesktopUpdateState(
       environment.appVersion,
@@ -861,8 +875,8 @@ export const make = Effect.gen(function* () {
       Effect.flatMap(
         Effect.fn("desktop.updates.applyUpdateAvailable")(function* (info) {
           const state = yield* Ref.get(updateStateRef);
-          if (desktopUpdateChannelOf(info.version) !== state.channel) {
-            yield* logUpdaterInfo("ignoring update that does not match selected channel", {
+          if (!(yield* offerable(info.version, state))) {
+            yield* logUpdaterInfo("ignoring update outside the selected channel or its floor", {
               version: info.version,
               channel: state.channel,
             });
@@ -998,9 +1012,9 @@ export const make = Effect.gen(function* () {
       Effect.flatMap(
         Effect.fn("desktop.updates.applyUpdateDownloaded")(function* (info) {
           const state = yield* Ref.get(updateStateRef);
-          // A download can finish after its track switch was backed out; never offer that build.
-          if (desktopUpdateChannelOf(info.version) !== state.channel) {
-            yield* logUpdaterInfo("ignoring download that does not match selected channel", {
+          // A download can finish after its track switch moved on; never offer that build.
+          if (!(yield* offerable(info.version, state))) {
+            yield* logUpdaterInfo("ignoring download outside the selected channel or its floor", {
               version: info.version,
               channel: state.channel,
             });
@@ -1118,6 +1132,7 @@ export const make = Effect.gen(function* () {
     }).pipe(Effect.withSpan("desktop.updates.configure")),
     setChannel: Effect.fn("desktop.updates.setChannel")(function* (
       nextChannel: DesktopUpdateChannel,
+      options?: { readonly minimumVersion?: string | undefined },
     ) {
       yield* Effect.annotateCurrentSpan({ channel: nextChannel });
       // A background check holds the updater only briefly, so wait it out instead of refusing.
@@ -1136,6 +1151,7 @@ export const make = Effect.gen(function* () {
       }
 
       return yield* Effect.gen(function* () {
+        yield* Ref.set(releaseFloorRef, Option.fromNullishOr(options?.minimumVersion));
         const state = yield* Ref.get(updateStateRef);
         // A build from another track re-checks, so retrying a track switch finds an older release.
         if (

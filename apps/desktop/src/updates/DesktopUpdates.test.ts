@@ -773,6 +773,32 @@ describe("DesktopUpdates", () => {
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
 
+  it.effect("offers nothing below a track switch's checked release", () => {
+    const harness = makeHarness({
+      appVersion: "1.2.4-nightly.20261027.1",
+      beforeSetUpdateChannel: Effect.void,
+    });
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        yield* updates.setChannel("latest", { minimumVersion: "1.2.3" });
+
+        harness.emit("update-available", { version: "1.2.2" });
+        yield* flushCallbacks;
+        assert.isNull((yield* updates.getState).availableVersion);
+        harness.emit("update-downloaded", { version: "1.2.2" });
+        yield* flushCallbacks;
+        assert.isNull((yield* updates.getState).downloadedVersion);
+
+        harness.emit("update-available", { version: "1.2.3" });
+        yield* flushCallbacks;
+        assert.equal((yield* updates.getState).availableVersion, "1.2.3");
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
   it.effect("keeps a saved Stable track across a restart without offering an older release", () => {
     // A Nightly build whose switch to Stable did not finish before the app quit.
     const harness = makeHarness({ appVersion: "1.2.4-nightly.20261027.1", savedChannel: "latest" });

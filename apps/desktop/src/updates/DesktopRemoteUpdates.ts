@@ -10,7 +10,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
-import { acceptsTrackSwitchRelease, desktopUpdateChannelOf } from "@t3tools/shared/cliRelease";
+import { desktopUpdateChannelOf } from "@t3tools/shared/cliRelease";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
@@ -181,7 +181,7 @@ export const listen: Effect.Effect<
         // toward Stable never offers an older build outside a guarded switch.
         if (request.channel !== undefined) {
           const switched = yield* Effect.raceFirst(
-            updates.setChannel(request.channel).pipe(
+            updates.setChannel(request.channel, { minimumVersion: request.targetVersion }).pipe(
               Effect.as(true),
               Effect.catch((error) =>
                 updates.getState.pipe(
@@ -212,38 +212,16 @@ export const listen: Effect.Effect<
             Effect.forkScoped,
           );
 
-        // A host leaving its build's track needs a build the database check cleared, which may be
-        // older than what it runs.
-        const target =
-          request.channel !== undefined && request.targetVersion !== undefined
-            ? { channel: request.channel, version: request.targetVersion }
-            : null;
+        // A host leaving its build's track may need an older build, down to the checked release
+        // (the updater offers nothing below it), and a crossing that finds nothing has failed.
         const crossing = (state: DesktopUpdateState) =>
-          target !== null && desktopUpdateChannelOf(state.currentVersion) !== target.channel;
+          request.channel !== undefined &&
+          request.targetVersion !== undefined &&
+          desktopUpdateChannelOf(state.currentVersion) !== request.channel;
         const step = Effect.fn("DesktopRemoteUpdates.step")(function* (
           state: DesktopUpdateState,
         ): Effect.fn.Return<boolean, never, Scope.Scope> {
-          const found = state.downloadedVersion ?? state.availableVersion;
-          const unchecked =
-            target !== null &&
-            crossing(state) &&
-            found !== null &&
-            !acceptsTrackSwitchRelease(found, target.channel, target.version);
-          // A cached offer can be stale, so refuse only after this request's own check settles.
-          if (unchecked && attempts.checks > 0 && state.status !== "checking") {
-            yield* publishReport(
-              state,
-              {
-                outcome: "failed",
-                reason: `The desktop app found ${found}, which is older than ${request.targetVersion}. Try again in a few minutes.`,
-              },
-              request.requestId,
-            );
-            return true;
-          }
-          const next = unchecked
-            ? ({ action: attempts.checks === 0 ? "check" : "wait" } as const)
-            : nextRemoteDesktopUpdateStep(state, attempts, disabledReason);
+          const next = nextRemoteDesktopUpdateStep(state, attempts, disabledReason);
           switch (next.action) {
             case "wait":
               return false;

@@ -1546,10 +1546,15 @@ function OpenCommandPaletteDialog(props: {
     },
   });
 
+  // Every group, so an archived project's thread still opens its own settings.
   const contextualProjectGroup =
     (contextualProjectRef
-      ? projectGroupByTargetKey.get(
-          `${contextualProjectRef.environmentId}:${contextualProjectRef.projectId}`,
+      ? projectGroups.find((group) =>
+          group.memberProjectRefs.some(
+            (ref) =>
+              ref.environmentId === contextualProjectRef.environmentId &&
+              ref.projectId === contextualProjectRef.projectId,
+          ),
         )
       : null) ??
     projectGroups[0] ??

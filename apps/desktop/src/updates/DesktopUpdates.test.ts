@@ -815,6 +815,21 @@ describe("DesktopUpdates", () => {
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
 
+  it.effect("never offers an older Nightly to a Nightly build's own checks", () => {
+    const harness = makeHarness({ appVersion: "1.2.4-nightly.20261027.1" });
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        yield* updates.check("poll");
+
+        assert.equal((yield* updates.getState).channel, "nightly");
+        assert.deepEqual(harness.checkAllowedDowngrade, [false]);
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
   it.effect("waits out a background check instead of refusing a track change", () =>
     Effect.gen(function* () {
       const checkStarted = yield* Deferred.make<void>();

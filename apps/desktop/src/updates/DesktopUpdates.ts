@@ -473,14 +473,18 @@ export const make = Effect.gen(function* () {
   ) {
     yield* Effect.annotateCurrentSpan({ channel });
     const allowsPrerelease = channel === "nightly";
+    // An older Nightly can lack migrations a newer one ran, so a Nightly build never downgrades
+    // unguarded. Other builds may need to step down to join Nightly.
+    const allowsDowngrade =
+      allowsPrerelease && desktopUpdateChannelOf(environment.appVersion) !== "nightly";
     yield* electronUpdater.setChannel(channel);
     yield* electronUpdater.setAllowPrerelease(allowsPrerelease);
-    yield* electronUpdater.setAllowDowngrade(allowsPrerelease);
+    yield* electronUpdater.setAllowDowngrade(allowsDowngrade);
     yield* electronUpdater.setFullChangelog(allowsPrerelease);
     yield* logUpdaterInfo("using update channel", {
       channel,
       allowPrerelease: allowsPrerelease,
-      allowDowngrade: allowsPrerelease,
+      allowDowngrade: allowsDowngrade,
       fullChangelog: allowsPrerelease,
     });
   });

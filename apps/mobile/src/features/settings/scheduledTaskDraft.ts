@@ -27,8 +27,6 @@ import {
   resolveNewTaskModelSelection,
 } from "../../lib/modelOptions";
 
-import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
-
 export function scheduledTaskDefaultModel(
   config: ServerConfig | null,
   project: (LegacyProjectSettingsFields & { readonly id: ProjectId }) | null,
@@ -39,7 +37,7 @@ export function scheduledTaskDefaultModel(
   const projectDefaultSelection =
     resolveDefaultableModelSelection(config, configured, project?.id ?? null) ??
     resolveDefaultableModelSelection(config, settings.defaultModelSelection, project?.id ?? null);
-  const defaultSelection = resolveNewTaskModelSelection({
+  return resolveNewTaskModelSelection({
     draftSelection: null,
     projectDefaultSelection,
     stickySelection: null,
@@ -50,14 +48,6 @@ export function scheduledTaskDefaultModel(
       project?.id ?? null,
     ),
   });
-  return resolveNewThreadModelSelection({
-    defaultSelection,
-    fallbackSelection: settings.fallbackModelSelection,
-    providers: config?.providers ?? [],
-    settings,
-    projectId: project?.id ?? null,
-    now: Date.now(),
-  }).selection;
 }
 
 export type ScheduleDraft = {

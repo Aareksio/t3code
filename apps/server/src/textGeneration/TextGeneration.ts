@@ -9,10 +9,7 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import { exhaustedUsageWindow } from "@t3tools/shared/usageLimits";
-import {
-  defaultTextGenerationModel,
-  fallbackTextGenerationModelSelection,
-} from "@t3tools/shared/serverSettings";
+import { fallbackTextGenerationModelSelection } from "@t3tools/shared/serverSettings";
 import * as ServerSettings from "../serverSettings.ts";
 import type { ProviderTextGeneration } from "@t3tools/provider-core/server/textGeneration";
 import { TextGenerationError } from "@t3tools/contracts";
@@ -91,11 +88,7 @@ export const make = Effect.gen(function* () {
       now,
       selection.model,
     );
-    const call = (modelSelection: ModelSelection) =>
-      resolveInstance(registry, operation, modelSelection.instanceId).pipe(
-        Effect.flatMap((service) => invoke(service, modelSelection)),
-      );
-    const retry = Effect.fn("TextGeneration.retryLimitedProvider")(function* () {
+    if (limited) {
       const settings = yield* serverSettings.getSettings.pipe(
         Effect.mapError(
           (cause) =>
@@ -106,70 +99,28 @@ export const make = Effect.gen(function* () {
             }),
         ),
       );
-      const fallback = fallbackTextGenerationModelSelection(
-        settings.providerInstances,
-        (instanceId, driver) => {
-          const provider = snapshots.find((candidate) => candidate.instanceId === instanceId);
-          return (
-            instanceId !== selection.instanceId &&
-            provider?.enabled === true &&
-            resolveProjectProviderInstanceEnabled(settings, null, instanceId) &&
-            provider.installed &&
-            provider.auth.status !== "unauthenticated" &&
-            isProviderAvailable(provider) &&
-            isProviderTextGenerationCapable(provider) &&
-            (operation !== "generateReviewGuide" || INVESTIGATING_DRIVERS.has(driver)) &&
-            !exhaustedUsageWindow(provider, now, defaultTextGenerationModel(driver))
-          );
-        },
-        {
-          includeConfiguredInstances: true,
-          ...(settings.fallbackModelSelection
-            ? { preferredInstanceId: settings.fallbackModelSelection.instanceId }
-            : {}),
-        },
-      );
-      return fallback;
-    });
-    if (limited) {
-      const fallback = yield* retry();
-      if (fallback) return yield* call(fallback);
-      return yield* call(selection);
+      selection =
+        fallbackTextGenerationModelSelection(
+          settings.providerInstances,
+          (instanceId, driver) => {
+            const provider = snapshots.find((candidate) => candidate.instanceId === instanceId);
+            return (
+              instanceId !== selection.instanceId &&
+              provider?.enabled === true &&
+              resolveProjectProviderInstanceEnabled(settings, null, instanceId) &&
+              provider.installed &&
+              provider.auth.status !== "unauthenticated" &&
+              isProviderAvailable(provider) &&
+              isProviderTextGenerationCapable(provider) &&
+              (operation !== "generateReviewGuide" || INVESTIGATING_DRIVERS.has(driver)) &&
+              !exhaustedUsageWindow(provider, now)
+            );
+          },
+          { includeConfiguredInstances: true },
+        ) ?? selection;
     }
-    return yield* call(selection).pipe(
-      Effect.catchTags({
-        TextGenerationError: Effect.fn("TextGeneration.handleFailure")(function* (error) {
-          let cause: unknown = error;
-          let usageLimited = false;
-          for (let depth = 0; depth < 8 && cause && typeof cause === "object"; depth++) {
-            const failure = cause as {
-              class?: unknown;
-              type?: unknown;
-              status?: unknown;
-              code?: unknown;
-              detail?: unknown;
-              message?: unknown;
-              cause?: unknown;
-            };
-            usageLimited ||=
-              failure.class === "usage_limit" ||
-              failure.type === "provider.rate-limit" ||
-              // OpenCode also types a never-resetting empty balance as quota, with HTTP 402.
-              (failure.type === "provider.quota" && failure.status !== 402) ||
-              [failure.code, failure.detail, failure.message].some(
-                (text) =>
-                  typeof text === "string" &&
-                  /usage[_ -]?limit|rate[_ -]?limit|quota.{0,30}(?:exceed|exhaust)|(?:exceed|exhaust).{0,30}quota|out of (?:usage|credits)|(?:you've hit|reached) your limit|too many requests/i.test(
-                    text,
-                  ),
-              );
-            cause = failure.cause;
-          }
-          if (!usageLimited) return yield* error;
-          const fallback = yield* retry();
-          return fallback ? yield* call(fallback) : yield* error;
-        }),
-      }),
+    return yield* resolveInstance(registry, operation, selection.instanceId).pipe(
+      Effect.flatMap((service) => invoke(service, selection)),
     );
   });
   return TextGeneration.of({
@@ -193,20 +144,26 @@ export const make = Effect.gen(function* () {
         service.generateReviewGuide({ ...input, modelSelection }),
       );
     }),
-    generateThreadTitle: Effect.fn("TextGeneration.generateThreadTitle")(function* (input) {
-      const linkedContext =
-        input.linkedContext ??
-        (yield* ThreadTitleLinks.resolveThreadTitleLinks(input).pipe(
-          Effect.provideService(
-            SourceControlProviderRegistry.SourceControlProviderRegistry,
-            sourceControl,
-          ),
-        ));
-      return yield* generate(
+    generateThreadTitle: Effect.fn("TextGeneration.generateThreadTitle")(function (input) {
+      return generate(
         "generateThreadTitle",
         input.modelSelection,
-        (service, modelSelection) =>
-          service.generateThreadTitle({ ...input, linkedContext, modelSelection }),
+        (textGeneration, modelSelection) =>
+          Effect.gen(function* () {
+            const linkedContext =
+              input.linkedContext ??
+              (yield* ThreadTitleLinks.resolveThreadTitleLinks(input).pipe(
+                Effect.provideService(
+                  SourceControlProviderRegistry.SourceControlProviderRegistry,
+                  sourceControl,
+                ),
+              ));
+            return yield* textGeneration.generateThreadTitle({
+              ...input,
+              linkedContext,
+              modelSelection,
+            });
+          }),
       );
     }),
   });

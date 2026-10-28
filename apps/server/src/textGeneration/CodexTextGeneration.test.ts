@@ -1,13 +1,11 @@
 import {
-  DEFAULT_SERVER_SETTINGS,
   DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER,
   ProviderDriverKind,
-  TextGenerationError,
+  type ModelSelection,
   type ServerProvider,
 } from "@t3tools/contracts";
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
-import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -446,21 +444,21 @@ it.layer(layerCodexTextGenerationTest)("CodexTextGeneration", (it) => {
   );
 });
 
-it.effect.each([
-  "usage-error",
-  "typed-quota",
-  "preflight",
-  "ordinary-error",
-  "retry-fails",
-] as const)("text generation fallback: %s", (scenario) =>
+it.effect.each([false, true])("text generation preflight: exhausted=%s", (exhausted) =>
   Effect.gen(function* () {
     const primary = ProviderInstanceId.make("codex");
-    const preferred = ProviderInstanceId.make("claude_work");
-    const calls: string[] = [];
-    const snapshots: ServerProvider[] = [
-      {
-        instanceId: primary,
-        driver: ProviderDriverKind.make("codex"),
+    const fallback = ProviderInstanceId.make("claude_work");
+    const selection = {
+      instanceId: primary,
+      model: "chat-model",
+      options: [{ id: "effort", value: "high" }],
+    };
+    const calls: ModelSelection[] = [];
+    const instances: ProviderInstance[] = [primary, fallback].map((instanceId) => {
+      const driver = ProviderDriverKind.make(instanceId === primary ? "codex" : "claudeAgent");
+      const snapshot: ServerProvider = {
+        instanceId,
+        driver,
         enabled: true,
         installed: true,
         status: "ready",
@@ -470,7 +468,7 @@ it.effect.each([
         models: [],
         slashCommands: [],
         skills: [],
-        ...(scenario === "preflight"
+        ...(exhausted && instanceId === primary
           ? {
               usageLimits: {
                 checkedAt: "1970-01-01T00:00:00Z",
@@ -478,58 +476,28 @@ it.effect.each([
               },
             }
           : {}),
-      },
-      {
-        instanceId: preferred,
-        driver: ProviderDriverKind.make("claudeAgent"),
+      };
+      return {
+        instanceId,
+        driverKind: driver,
+        continuationIdentity: { driverKind: driver, continuationKey: instanceId },
+        displayName: undefined,
         enabled: true,
-        installed: true,
-        status: "ready",
-        auth: { status: "authenticated" },
-        version: null,
-        checkedAt: "1970-01-01T00:00:00Z",
-        models: [],
-        slashCommands: [],
-        skills: [],
-      },
-    ];
-    const instances: ProviderInstance[] = snapshots.map((snapshot) => ({
-      instanceId: snapshot.instanceId,
-      driverKind: snapshot.driver,
-      continuationIdentity: { driverKind: snapshot.driver, continuationKey: snapshot.instanceId },
-      displayName: undefined,
-      enabled: true,
-      snapshot: { getSnapshot: Effect.succeed(snapshot) } as ProviderInstance["snapshot"],
-      orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
-      textGeneration: TextGeneration.TextGeneration.of({
-        generateCommitMessage: () => Effect.die("unused"),
-        generatePrContent: () => Effect.die("unused"),
-        generateBranchName: () => Effect.die("unused"),
-        generateReviewGuide: () => Effect.die("unused"),
-        generateThreadTitle: (input) =>
-          Effect.gen(function* () {
-            calls.push(input.modelSelection.instanceId);
-            if (snapshot.instanceId === primary || scenario === "retry-fails")
-              return yield* new TextGenerationError({
-                operation: "generateThreadTitle",
-                detail:
-                  scenario === "ordinary-error"
-                    ? "invalid credentials"
-                    : scenario === "typed-quota"
-                      ? "Provider request failed"
-                      : "You've hit your usage limit",
-                ...(scenario === "typed-quota" && snapshot.instanceId === primary
-                  ? { cause: { type: "provider.quota", message: "Budget exceeded", status: 429 } }
-                  : {}),
-              });
-            expect(input.modelSelection.model).toBe(
-              DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER[ProviderDriverKind.make("claudeAgent")],
-            );
-            expect(input.modelSelection.options).toBeUndefined();
-            return { title: "Fallback title" };
-          }),
-      }),
-    }));
+        snapshot: { getSnapshot: Effect.succeed(snapshot) } as ProviderInstance["snapshot"],
+        orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+        textGeneration: TextGeneration.TextGeneration.of({
+          generateCommitMessage: () => Effect.die("unused"),
+          generatePrContent: () => Effect.die("unused"),
+          generateBranchName: () => Effect.die("unused"),
+          generateReviewGuide: () => Effect.die("unused"),
+          generateThreadTitle: (input) =>
+            Effect.sync(() => {
+              calls.push(input.modelSelection);
+              return { title: "Generated title" };
+            }),
+        }),
+      };
+    });
     const service = yield* TextGeneration.make.pipe(
       Effect.provide(
         Layer.mergeAll(
@@ -538,17 +506,10 @@ it.effect.each([
             getInstance: (id) =>
               Effect.succeed(instances.find((instance) => instance.instanceId === id)),
           }),
-          Layer.mock(ProviderRegistry.ProviderRegistry)({
-            getProviders: Effect.succeed(snapshots),
-          }),
-          Layer.mock(ServerSettings.ServerSettingsService)({
-            getSettings: Effect.succeed({
-              ...DEFAULT_SERVER_SETTINGS,
-              fallbackModelSelection: { instanceId: preferred, model: "chat-model" },
-              providerInstances: {
-                [preferred]: { driver: ProviderDriverKind.make("claudeAgent"), config: {} },
-              },
-            }),
+          ServerSettings.layerTest({
+            providerInstances: {
+              [fallback]: { driver: ProviderDriverKind.make("claudeAgent"), config: {} },
+            },
           }),
           Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({
             resolveLink: () => Effect.die("unused"),
@@ -556,27 +517,22 @@ it.effect.each([
         ),
       ),
     );
-    const result = yield* service
-      .generateThreadTitle({
+    expect(
+      yield* service.generateThreadTitle({
         cwd: "/tmp",
         message: "hello",
         linkedContext: "",
-        modelSelection: {
-          instanceId: primary,
-          model: "chat-model",
-          options: [{ id: "effort", value: "high" }],
-        },
-      })
-      .pipe(Effect.result);
-    expect(calls).toEqual(
-      scenario === "preflight"
-        ? [preferred]
-        : scenario === "ordinary-error"
-          ? [primary]
-          : [primary, preferred],
-    );
-    expect(result._tag).toBe(
-      scenario === "ordinary-error" || scenario === "retry-fails" ? "Failure" : "Success",
-    );
+        modelSelection: selection,
+      }),
+    ).toEqual({ title: "Generated title" });
+    expect(calls).toEqual([
+      exhausted
+        ? {
+            instanceId: fallback,
+            model:
+              DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER[ProviderDriverKind.make("claudeAgent")],
+          }
+        : selection,
+    ]);
   }),
 );

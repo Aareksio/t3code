@@ -28,14 +28,12 @@ export function exhaustedUsageWindow(
 ) {
   const exhausted = (provider?.usageLimits?.windows ?? []).filter(
     (window) =>
-      window.usedPercent !== undefined &&
-      window.usedPercent >= 100 &&
+      (window.usedPercent ?? 0) >= 100 &&
       (!window.resetsAt ||
         !Number.isFinite(Date.parse(window.resetsAt)) ||
         Date.parse(window.resetsAt) > now),
   );
   if (model === undefined) return exhausted[0];
-  // Some drivers report separate allowances per model family; only the ones this model draws from count.
   switch (provider?.driver) {
     case "cursor": {
       const api = exhausted.find((window) => window.id === "apiPercentUsed");

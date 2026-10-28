@@ -1,6 +1,5 @@
 import {
   DEFAULT_SERVER_SETTINGS,
-  DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -27,39 +26,22 @@ import {
 const FOLDED_SERVER_SETTINGS = { ...DEFAULT_SERVER_SETTINGS, projectSettingsFolded: true };
 
 describe("fallbackTextGenerationModelSelection", () => {
-  it("prefers the configured fallback instance with its driver's text generation model", () => {
-    const preferred = ProviderInstanceId.make("claude_work");
-    expect(
-      fallbackTextGenerationModelSelection(
-        { [preferred]: { driver: ProviderDriverKind.make("claudeAgent"), config: {} } },
-        () => true,
-        { includeConfiguredInstances: true, preferredInstanceId: preferred },
-      ),
-    ).toEqual({
-      instanceId: preferred,
-      model: DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER[ProviderDriverKind.make("claudeAgent")],
-    });
-  });
-  it("replaces and clears the fallback without merging the previous model's options", () => {
-    const first = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
-      fallbackModelSelection: {
-        instanceId: ProviderInstanceId.make("codex"),
-        model: "first",
-        options: [{ id: "effort", value: "high" }],
+  it("replaces and clears the fallback without carrying model options", () => {
+    const fallbackModelSelection = { instanceId: ProviderInstanceId.make("codex"), model: "new" };
+    const settings = applyServerSettingsPatch(
+      {
+        ...DEFAULT_SERVER_SETTINGS,
+        fallbackModelSelection: {
+          ...fallbackModelSelection,
+          model: "old",
+          options: [{ id: "effort", value: "high" }],
+        },
       },
-    });
-    const second = applyServerSettingsPatch(first, {
-      fallbackModelSelection: {
-        instanceId: ProviderInstanceId.make("claudeAgent"),
-        model: "second",
-      },
-    });
-    expect(second.fallbackModelSelection).toEqual({
-      instanceId: ProviderInstanceId.make("claudeAgent"),
-      model: "second",
-    });
+      { fallbackModelSelection },
+    );
+    expect(settings.fallbackModelSelection).toEqual(fallbackModelSelection);
     expect(
-      applyServerSettingsPatch(second, { fallbackModelSelection: null }).fallbackModelSelection,
+      applyServerSettingsPatch(settings, { fallbackModelSelection: null }).fallbackModelSelection,
     ).toBeNull();
   });
   it("ignores a configured non-default instance at machine scope, matching no fallback", () => {

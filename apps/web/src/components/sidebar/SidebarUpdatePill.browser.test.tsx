@@ -1,16 +1,20 @@
-import type { DesktopUpdateState } from "@t3tools/contracts";
+import type { DesktopUpdateState, EnvironmentId } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
 
 import "~/index.css";
 import { act, render } from "../../../test/render";
 import { SidebarUpdatePill } from "./SidebarUpdatePill";
+import type { RestartingMachine, UpdateEverythingRow } from "./updateEverything.logic";
 
 const mocks = vi.hoisted(() => {
   const listeners = new Set<() => void>();
   return {
     update: null as DesktopUpdateState | null,
     hasUpdates: false,
+    rows: [] as ReadonlyArray<UpdateEverythingRow>,
+    restarts: [] as ReadonlyArray<RestartingMachine>,
+    run: vi.fn(async () => {}),
     subscribe: (listener: () => void) => {
       listeners.add(listener);
       return () => listeners.delete(listener);
@@ -39,8 +43,9 @@ vi.mock("./useUpdateEverything", () => ({
     summary: "Update everything",
     version: null,
     providerCount: 0,
-    rows: [],
-    restarts: [],
+    rows: mocks.rows,
+    restarts: mocks.restarts,
+    run: mocks.run,
   }),
 }));
 
@@ -69,9 +74,19 @@ const RELEASE_NOTES: DesktopUpdateState["releaseNotes"] = [
   { version: "0.0.50-nightly.2", items: ["Faster sidebar."], totalItems: 1 },
 ];
 
-function setup(update: DesktopUpdateState | null, { hasUpdates = false } = {}) {
+function setup(
+  update: DesktopUpdateState | null,
+  {
+    hasUpdates = false,
+    rows = [] as ReadonlyArray<UpdateEverythingRow>,
+    restarts = [] as ReadonlyArray<RestartingMachine>,
+  } = {},
+) {
   mocks.update = update;
   mocks.hasUpdates = hasUpdates;
+  mocks.rows = rows;
+  mocks.restarts = restarts;
+  mocks.run.mockClear();
 }
 
 function publish(update: DesktopUpdateState | null) {
@@ -128,5 +143,52 @@ describe("SidebarUpdatePill update everything", () => {
 
     await userEvent.keyboard("{Escape}");
     await vi.waitFor(() => expect(document.activeElement).toBe(button.element()));
+  });
+
+  const studio = "studio" as EnvironmentId;
+  const interruption = /Running tasks and tool calls will be interrupted/;
+
+  it.each([
+    { choice: "Cancel", runs: 0 },
+    { choice: "Update", runs: 1 },
+  ] as const)(
+    "warns that a restarting machine with no loaded threads interrupts running work ($choice)",
+    async ({ choice, runs }) => {
+      setup(null, {
+        hasUpdates: true,
+        rows: [
+          {
+            environmentId: studio,
+            label: "Studio",
+            app: "desktop-app",
+            skipped: null,
+            providers: [],
+          },
+        ],
+        restarts: [{ environmentId: studio, continuesThreads: true }],
+      });
+      await using screen = await render(<SidebarUpdatePill />);
+      await userEvent.click(screen.getByRole("button", { name: "Update everything" }));
+      const dialog = page.getByRole("alertdialog");
+      await expect.element(dialog.getByText(interruption)).toBeVisible();
+
+      await userEvent.click(dialog.getByRole("button", { name: choice, exact: true }));
+      await vi.waitFor(() => expect(document.querySelector('[role="alertdialog"]')).toBeNull());
+      await vi.waitFor(() => expect(mocks.run).toHaveBeenCalledTimes(runs));
+    },
+  );
+
+  it("does not warn about interruptions when only providers update", async () => {
+    setup(null, {
+      hasUpdates: true,
+      rows: [
+        { environmentId: studio, label: "Studio", app: null, skipped: null, providers: ["Codex"] },
+      ],
+    });
+    await using screen = await render(<SidebarUpdatePill />);
+    await userEvent.click(screen.getByRole("button", { name: "Update everything" }));
+    const dialog = page.getByRole("alertdialog");
+    await expect.element(dialog.getByText("Codex")).toBeVisible();
+    expect(dialog.getByText(interruption).query()).toBeNull();
   });
 });

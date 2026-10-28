@@ -54,29 +54,6 @@ export interface SimlockHostEnvironment {
   readonly hosts: ReadonlyArray<SimlockDeviceHostConfigType>;
 }
 
-/** Each host once, with the selected environments that have it and whether each holds a token. */
-export function groupSimlockDeviceHosts(environments: ReadonlyArray<SimlockHostEnvironment>) {
-  const groups = new Map<
-    string,
-    {
-      host: SimlockDeviceHostConfigType;
-      environments: Array<{ environmentId: EnvironmentId; label: string; hasToken: boolean }>;
-    }
-  >();
-  for (const environment of environments) {
-    for (const host of environment.hosts) {
-      const group = groups.get(host.id) ?? { host, environments: [] };
-      group.environments.push({
-        environmentId: environment.environmentId,
-        label: environment.label,
-        hasToken: host.agentToken !== "",
-      });
-      groups.set(host.id, group);
-    }
-  }
-  return [...groups.values()];
-}
-
 /** A token field: the environment's saved token, a replacement, or none. */
 export type SimlockTokenEntry =
   | { kind: "saved" }

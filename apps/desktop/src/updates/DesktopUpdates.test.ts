@@ -820,6 +820,25 @@ describe("DesktopUpdates", () => {
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
 
+  it.effect("keeps a saved Nightly track across a restart without crossing on its own", () => {
+    // A Stable build whose switch to Nightly was refused before the app quit; its floor is gone.
+    const harness = makeHarness({ savedChannel: "nightly" });
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        yield* updates.check("startup");
+        harness.emit("update-available", { version: "1.2.4-nightly.20261027.1" });
+        yield* flushCallbacks;
+
+        assert.equal((yield* updates.getState).channel, "nightly");
+        assert.isNull((yield* updates.getState).availableVersion);
+        assert.deepEqual(harness.checkAllowedDowngrade, [false]);
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
   it.effect("never offers an older Nightly to a Nightly build's own checks", () => {
     const harness = makeHarness({ appVersion: "1.2.4-nightly.20261027.1" });
 

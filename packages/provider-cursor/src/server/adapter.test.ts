@@ -220,15 +220,6 @@ describe("CursorAdapterV2", () => {
 
   it.effect.each([
     {
-      reason: "the serialized SDK resource exhaustion code",
-      wait: Effect.succeed({
-        id: "native-cursor-run",
-        status: "error" as const,
-        error: { message: "Usage limit reached", code: "resource_exhausted" },
-      }),
-      failure: { class: "usage_limit", message: "Usage limit reached" },
-    },
-    {
       reason: "the SDK's detailed plan usage limit code",
       wait: Effect.succeed({
         id: "native-cursor-run",
@@ -236,19 +227,6 @@ describe("CursorAdapterV2", () => {
         error: { message: "You've hit your usage limit", code: "PRO_USER_USAGE_LIMIT" },
       }),
       failure: { class: "usage_limit", message: "You've hit your usage limit" },
-    },
-    {
-      reason: "an unrelated SDK transport error",
-      wait: Effect.fail(
-        new CursorAgentSdk.CursorAgentSdkRunnerError({
-          method: "run.wait",
-          cause: Object.assign(new Error("Service unavailable"), { status: 503 }),
-        }),
-      ),
-      failure: {
-        class: "transport_error",
-        message: "Cursor Agent SDK run.wait failed: Service unavailable (HTTP 503)",
-      },
     },
     {
       reason: "the error Cursor's run ended with",

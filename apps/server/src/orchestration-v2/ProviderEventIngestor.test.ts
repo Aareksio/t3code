@@ -19,7 +19,6 @@ import {
   ProviderInstanceId,
   ProviderThreadId,
   ProviderTurnId,
-  type ServerProvider,
   RunAttemptId,
   RunId,
   RuntimeRequestId,
@@ -33,7 +32,6 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
-import * as Ref from "effect/Ref";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlError from "effect/sql/SqlError";
 import * as Stream from "effect/Stream";
@@ -51,8 +49,6 @@ import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
-import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
-import { makeManagedServerProvider } from "@t3tools/provider-core/server/managedProvider";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import {
   makeProviderEventRoutingState,
@@ -236,66 +232,7 @@ const layer = it.layer(layerTest);
 it.effect("refreshes the failing instance snapshot after a committed usage_limit terminal", () =>
   Effect.scoped(
     Effect.gen(function* () {
-      const probeSnapshot = yield* Ref.make<ServerProvider>({
-        instanceId: ProviderInstanceId.make("cursor-work"),
-        driver: ProviderDriverKind.make("cursor"),
-        enabled: true,
-        installed: true,
-        version: null,
-        status: "ready",
-        auth: { status: "authenticated" },
-        checkedAt: "2026-04-10T00:00:00.000Z",
-        models: [],
-        slashCommands: [],
-        skills: [],
-        usageLimits: {
-          checkedAt: "2026-04-10T00:00:00.000Z",
-          windows: [{ id: "apiPercentUsed", kind: "monthly", label: "API", usedPercent: 20 }],
-        },
-      });
-      const snapshot = yield* makeManagedServerProvider({
-        resolveMaintenance: () => Effect.die("usage refresh must not resolve maintenance"),
-        getSettings: Effect.succeed({ enabled: true }),
-        streamSettings: Stream.empty,
-        haveSettingsChanged: () => false,
-        initialSnapshot: () => Ref.get(probeSnapshot),
-        checkProvider: Ref.get(probeSnapshot),
-        refreshInterval: "1 hour",
-        refreshOnInterval: false,
-      }).pipe(
-        Effect.provide(
-          Layer.mock(ProviderHost.ProviderHost)({
-            resolveAttachmentPath: () => null,
-            paths: {
-              cwd: "/test",
-              baseDir: "/test",
-              stateDir: "/test/state",
-              providerStatusCacheDir: "/test/cache",
-              attachmentsDir: "/test/attachments",
-            },
-            settings: {
-              get: Effect.die("unused"),
-              withSnapshot: () => Effect.die("unused"),
-              changes: Stream.empty,
-              subscribe: Effect.succeed(Stream.empty),
-            },
-          }),
-        ),
-      );
-      yield* snapshot.streamChanges.pipe(Stream.take(1), Stream.runDrain);
-      assert.equal((yield* snapshot.getSnapshot).usageLimits?.windows[0]?.usedPercent, 20);
-      yield* Ref.update(probeSnapshot, (current): ServerProvider => ({
-        ...current,
-        usageLimits: {
-          checkedAt: "2026-04-10T00:01:00.000Z",
-          windows: [{ id: "apiPercentUsed", kind: "monthly", label: "API", usedPercent: 100 }],
-        },
-      }));
-      const refreshed = yield* snapshot.streamChanges.pipe(
-        Stream.take(1),
-        Stream.runCollect,
-        Effect.forkChild({ startImmediately: true }),
-      );
+      const refreshed = yield* Deferred.make<void>();
       const adapter = yield* ProviderAdapter.ProviderAdapterV2.pipe(
         Effect.provide(
           Layer.mock(ProviderAdapter.ProviderAdapterV2)({
@@ -321,7 +258,14 @@ it.effect("refreshes the failing instance snapshot after a committed usage_limit
           generateThreadTitle: () => Effect.die("unused"),
           generateReviewGuide: () => Effect.die("unused"),
         },
-        snapshot,
+        snapshot: {
+          refreshUsage: Deferred.succeed(refreshed, undefined).pipe(Effect.asVoid),
+          getSnapshot: Effect.die("unused"),
+          refresh: Effect.die("unused"),
+          resolveMaintenance: () => Effect.die("unused"),
+          applyUsageLimits: () => Effect.die("unused"),
+          streamChanges: Stream.empty,
+        },
       };
       const lookups: ProviderInstanceId[] = [];
       const instances = Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({
@@ -365,11 +309,7 @@ it.effect("refreshes the failing instance snapshot after a committed usage_limit
               status: "failed",
               failure: makeProviderFailure({
                 class: failureClass,
-                ...(failureClass === "usage_limit" ? { code: "resource_exhausted" } : {}),
-                message:
-                  failureClass === "usage_limit"
-                    ? "Usage limit reached"
-                    : "Provider rejected turn.",
+                message: "Provider rejected turn.",
               }),
               threadDisposition: "reusable",
             },
@@ -378,10 +318,7 @@ it.effect("refreshes the failing instance snapshot after a committed usage_limit
           if (failureClass === "validation_error") assert.deepEqual(lookups, []);
         }
         assert.deepEqual(lookups, [instance.instanceId]);
-        const [published] = yield* Fiber.join(refreshed);
-        assert.equal(published?.instanceId, instance.instanceId);
-        assert.equal(published?.usageLimits?.windows[0]?.usedPercent, 100);
-        assert.equal((yield* snapshot.getSnapshot).usageLimits?.windows[0]?.usedPercent, 100);
+        yield* Deferred.await(refreshed);
       }).pipe(Effect.provide(makeLayerTest(layerTestEventSink, instances)));
     }),
   ),

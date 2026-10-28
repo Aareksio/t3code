@@ -252,8 +252,6 @@ export function taskToDraft(task: ScheduledTask): DraftState {
   };
 }
 
-import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
-
 export function scheduledTaskDefaultModel(
   settings: ServerSettings,
   project: (LegacyProjectSettingsFields & { readonly id: ProjectId }) | null,
@@ -266,15 +264,6 @@ export function scheduledTaskDefaultModel(
       entry.isAvailable &&
       entry.snapshot.auth.status !== "unauthenticated",
   );
-  const resolve = (defaultSelection: ModelSelection | null) =>
-    resolveNewThreadModelSelection({
-      defaultSelection,
-      fallbackSelection: settings.fallbackModelSelection,
-      providers: entries.map((entry) => entry.snapshot),
-      settings,
-      projectId: project?.id ?? null,
-      now: Date.now(),
-    }).selection;
   const configured = resolveProjectSettings(settings, project?.id ?? null, project).settings
     .defaultModelSelection;
   for (const selection of [configured, settings.defaultModelSelection]) {
@@ -286,7 +275,7 @@ export function scheduledTaskDefaultModel(
           entry.models.find((model) => model.slug === selection.model)?.isLegacy !== true,
       )
     )
-      return resolve(selection);
+      return selection;
   }
   const models = available.flatMap((entry) =>
     entry.models
@@ -294,5 +283,5 @@ export function scheduledTaskDefaultModel(
       .map((model) => ({ instanceId: entry.instanceId, model })),
   );
   const fallback = models.find(({ model }) => model.isDefault) ?? models[0];
-  return resolve(fallback ? { instanceId: fallback.instanceId, model: fallback.model.slug } : null);
+  return fallback ? { instanceId: fallback.instanceId, model: fallback.model.slug } : null;
 }

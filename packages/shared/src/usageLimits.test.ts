@@ -1,4 +1,5 @@
 import {
+  DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -17,6 +18,7 @@ import {
   collectLimitNotices,
   collectLimitPools,
   elapsedShare,
+  exhaustedUsageWindow,
   paceOf,
   paceRemainingPercent,
   usesChatGptSharing,
@@ -65,111 +67,89 @@ describe("new thread model fallback", () => {
     driver: ProviderDriverKind.make("claudeAgent"),
   });
 
-  it("uses an available fallback for an exhausted default", () => {
-    expect(
-      resolveNewThreadModelSelection({
-        defaultSelection: selection,
-        fallbackSelection: fallback,
-        providers: [limited, available],
-        now,
-      }).selection,
-    ).toEqual(fallback);
-  });
-  it("keeps the default without a usable fallback", () => {
-    for (const candidate of [null, fallback]) {
-      expect(
-        resolveNewThreadModelSelection({
-          defaultSelection: selection,
-          fallbackSelection: candidate,
-          providers: [limited, { ...available, usageLimits: limited.usageLimits }],
-          now,
-        }).selection,
-      ).toEqual(selection);
-    }
-  });
-  it("keeps explicit selections and ignores expired windows", () => {
-    expect(
-      resolveNewThreadModelSelection({
-        defaultSelection: selection,
-        explicitSelection: selection,
-        fallbackSelection: fallback,
-        providers: [limited, available],
-        now,
-      }).selection,
-    ).toEqual(selection);
-    expect(
-      resolveNewThreadModelSelection({
-        defaultSelection: selection,
-        fallbackSelection: fallback,
-        providers: [limited, available],
-        now: Date.parse("2026-09-04T00:00:00Z"),
-      }).selection,
-    ).toEqual(selection);
-  });
-  it("treats an unknown reset as exhausted and rejects disabled or unavailable fallbacks", () => {
-    const unknown = {
-      ...limited,
-      usageLimits: {
-        ...limited.usageLimits!,
-        windows: [{ ...window, usedPercent: 100, resetsAt: undefined }],
-      },
-    };
-    expect(
-      resolveNewThreadModelSelection({
-        defaultSelection: selection,
-        fallbackSelection: fallback,
-        providers: [unknown, available],
-        now,
-      }).selection,
-    ).toEqual(fallback);
-    for (const candidate of [
-      { ...available, enabled: false },
-      { ...available, installed: false },
-      { ...available, auth: { status: "unauthenticated" as const } },
-    ]) {
-      expect(
-        resolveNewThreadModelSelection({
-          defaultSelection: selection,
-          fallbackSelection: fallback,
-          providers: [unknown, candidate],
-          now,
-        }).selection,
-      ).toEqual(selection);
-    }
-  });
-  it("only counts the usage pools the default model draws from", () => {
-    const pools = (driver: string, ids: readonly string[]) =>
-      provider({
-        driver: ProviderDriverKind.make(driver),
-        usageLimits: {
-          checkedAt: "2026-09-03T11:00:00.000Z",
-          windows: ids.map((id) => ({ ...window, id, usedPercent: 100 })),
+  const defaults = {
+    defaultSelection: selection,
+    fallbackSelection: fallback,
+    providers: [limited, available],
+    now,
+  };
+  it.each([
+    ["exhausted default", {}, fallback],
+    ["explicit selection", { explicitSelection: selection }, selection],
+    ["missing default", { defaultSelection: null }, null],
+    ["no fallback", { fallbackSelection: null }, selection],
+    ["expired window", { now: Date.parse("2026-09-04T00:00:00Z") }, selection],
+    [
+      "environment disabled",
+      {
+        settings: {
+          ...DEFAULT_SERVER_SETTINGS,
+          providerInstances: {
+            [fallback.instanceId]: { driver: available.driver, enabled: false, config: {} },
+          },
         },
-      });
-    const resolve = (limited: ServerProvider, model: string) =>
+      },
+      selection,
+    ],
+  ] as const)("resolves %s", (_name, overrides, expected) => {
+    expect(resolveNewThreadModelSelection({ ...defaults, ...overrides }).selection).toEqual(
+      expected,
+    );
+  });
+  it.each([
+    { enabled: false },
+    { installed: false },
+    { auth: { status: "unauthenticated" as const } },
+    { availability: "unavailable" as const },
+    { usageLimits: limited.usageLimits },
+  ])("rejects an unusable fallback: %j", (overrides) => {
+    expect(
       resolveNewThreadModelSelection({
-        defaultSelection: { instanceId: limited.instanceId, model },
-        fallbackSelection: fallback,
-        providers: [limited, available],
+        ...defaults,
+        providers: [limited, { ...available, ...overrides }],
+      }).selection,
+    ).toEqual(selection);
+  });
+  it.each([undefined, "invalid"])("treats an unknown reset as exhausted: %s", (resetsAt) => {
+    expect(
+      exhaustedUsageWindow(
+        provider({
+          usageLimits: {
+            checkedAt: limited.checkedAt,
+            windows: [{ ...window, usedPercent: 100, resetsAt }],
+          },
+        }),
         now,
-      }).selection?.model;
-    expect(resolve(pools("cursor", ["autoPercentUsed"]), "claude-opus-5-5")).toBe(
-      "claude-opus-5-5",
-    );
-    expect(resolve(pools("cursor", ["autoPercentUsed"]), "composer-2.5")).toBe("composer-2.5");
-    expect(resolve(pools("cursor", ["autoPercentUsed", "apiPercentUsed"]), "composer-2.5")).toBe(
-      fallback.model,
-    );
-    expect(resolve(pools("antigravity", ["gemini-weekly"]), "claude-opus-5-5")).toBe(
-      "claude-opus-5-5",
-    );
-    expect(resolve(pools("antigravity", ["3p-weekly"]), "claude-opus-5-5")).toBe(fallback.model);
-    expect(resolve(pools("antigravity", ["gemini-weekly"]), "antigravity-default")).toBe(
-      fallback.model,
-    );
-    expect(resolve(pools("opencode", ["go_weekly"]), "opencode/big-pickle")).toBe(
-      "opencode/big-pickle",
-    );
+      ),
+    ).toBeDefined();
+  });
+  it.each([
+    ["cursor", ["autoPercentUsed"], "claude-opus-5-5", false],
+    ["cursor", ["autoPercentUsed"], "composer-2.5", false],
+    ["cursor", ["autoPercentUsed", "apiPercentUsed"], "composer-2.5", true],
+    ["antigravity", ["gemini-weekly"], "claude-opus-5-5", false],
+    ["antigravity", ["3p-weekly"], "claude-opus-5-5", true],
+    ["antigravity", ["gemini-weekly"], "antigravity-default", true],
+    ["opencode", ["go_weekly"], "opencode/big-pickle", false],
+    ["opencode", ["go_weekly"], "opencode-go/big-pickle", true],
+  ] as const)("matches %s pools %s to %s", (driver, ids, model, usesFallback) => {
+    const defaultSelection = { ...selection, model };
+    expect(
+      resolveNewThreadModelSelection({
+        ...defaults,
+        defaultSelection,
+        providers: [
+          provider({
+            driver: ProviderDriverKind.make(driver),
+            usageLimits: {
+              checkedAt: limited.checkedAt,
+              windows: ids.map((id) => ({ ...window, id, usedPercent: 100 })),
+            },
+          }),
+          available,
+        ],
+      }).selection,
+    ).toEqual(usesFallback ? fallback : defaultSelection);
   });
 });
 

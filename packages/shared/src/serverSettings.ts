@@ -96,7 +96,6 @@ export function fallbackTextGenerationModelSelection(
   options?: {
     readonly includeConfiguredInstances?: boolean;
     readonly defaultModelSelection?: ModelSelection | null;
-    readonly preferredInstanceId?: ProviderInstanceId;
   },
 ): ModelSelection | null {
   const candidates = [
@@ -111,10 +110,7 @@ export function fallbackTextGenerationModelSelection(
         )
       : []),
   ];
-  const preferred = candidates.find(([instanceId]) => instanceId === options?.preferredInstanceId);
-  const match = [...(preferred ? [preferred] : []), ...candidates].find(([instanceId, driver]) =>
-    isEnabled(instanceId, driver),
-  );
+  const match = candidates.find(([instanceId, driver]) => isEnabled(instanceId, driver));
   if (match === undefined) return null;
   const [instanceId, driver] = match;
   const threadDefault = options?.defaultModelSelection;
@@ -125,15 +121,13 @@ export function fallbackTextGenerationModelSelection(
   ) {
     return threadDefault;
   }
-  return { instanceId, model: defaultTextGenerationModel(driver) };
-}
-
-export function defaultTextGenerationModel(driver: ProviderDriverKind): string {
-  return (
-    DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER[driver] ??
-    DEFAULT_MODEL_BY_PROVIDER[driver] ??
-    DEFAULT_TEXT_GENERATION_MODEL
-  );
+  return {
+    instanceId,
+    model:
+      DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER[driver] ??
+      DEFAULT_MODEL_BY_PROVIDER[driver] ??
+      DEFAULT_TEXT_GENERATION_MODEL,
+  };
 }
 
 export function resolveSourceControlWriterModelSelection(

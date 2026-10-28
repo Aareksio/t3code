@@ -760,36 +760,15 @@ export default function ChatView(props: ChatViewProps) {
       });
     }
   }
-  const nowMinute = useNowMinute();
-  const draftDefaultModelSelection = draftThread
-    ? resolveProjectSettings(
-        settings,
-        fallbackDraftProject?.id ?? null,
-        fallbackDraftProject ?? undefined,
-      ).settings.defaultModelSelection
-    : null;
-  const draftFallback = draftThread
-    ? resolveNewThreadModelSelection({
-        defaultSelection:
-          draftDefaultModelSelection ??
-          resolveProjectDefaultProviderModelSelection(
-            providersByEnvironment.get(draftThread.environmentId) ?? [],
-            settings,
-            draftThread.projectId,
-          ),
-        fallbackSelection: settings.fallbackModelSelection,
-        providers: providersByEnvironment.get(draftThread.environmentId) ?? [],
-        settings,
-        projectId: draftThread.projectId,
-        now: Date.parse(`${nowMinute}:00Z`),
-      })
-    : null;
   const localDraftThread = draftThread
     ? buildLocalDraftThread(
         threadId,
         draftThread,
-        (draftFallback?.fallback ? draftFallback.selection : draftDefaultModelSelection) ??
-          NO_PROVIDER_MODEL_SELECTION,
+        resolveProjectSettings(
+          settings,
+          fallbackDraftProject?.id ?? null,
+          fallbackDraftProject ?? undefined,
+        ).settings.defaultModelSelection ?? NO_PROVIDER_MODEL_SELECTION,
       )
     : undefined;
   const isServerThread = serverThread !== null;
@@ -1081,6 +1060,7 @@ export default function ChatView(props: ChatViewProps) {
   const activeProjectScripts = activeProject ? resolveProjectScripts(settings, activeProject) : [];
   const { projectCloneBannerItem, projectCloneSendBlockReason } =
     useProjectCloneBanner(activeProjectRef);
+  const nowMinute = useNowMinute();
   const defaultModelResolution = resolveNewThreadModelSelection({
     defaultSelection:
       activeProjectSettings.settings.defaultModelSelection ??
@@ -1095,10 +1075,7 @@ export default function ChatView(props: ChatViewProps) {
     projectId: activeProject?.id ?? null,
     now: Date.parse(`${nowMinute}:00Z`),
   });
-  const activeProjectDefaultModelSelection =
-    !isServerThread && defaultModelResolution.fallback
-      ? defaultModelResolution.selection
-      : activeProjectSettings.settings.defaultModelSelection;
+  const activeProjectDefaultModelSelection = activeProjectSettings.settings.defaultModelSelection;
   const handleNewThreadInActiveProject = () => {
     startNewThreadForProject(activeProjectRef, handleNewThread);
   };

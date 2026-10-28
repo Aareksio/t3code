@@ -828,9 +828,7 @@ function DeviceIntegrationControls({
     (environment) => environment.serverConfig?.settings.enableDeviceSupport,
   );
   const simlockEnabled = connectedEnvironments.some(
-    (environment) =>
-      environment.environmentId === environmentId &&
-      environment.serverConfig?.settings.simlockDeviceHostsEnabled,
+    (environment) => environment.serverConfig?.settings.simlockDeviceHostsEnabled,
   );
   const configure = useAtomCommand(deviceEnvironment.configure, { reportFailure: false });
   const list = useAtomCommand(deviceEnvironment.list, { reportFailure: false });

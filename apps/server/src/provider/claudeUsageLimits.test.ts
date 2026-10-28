@@ -6,26 +6,6 @@ const checkedAt = "2026-07-18T10:00:00.000Z";
 const noNames = { overageIncluded: undefined } as const;
 
 describe("claudeUsageResponseToLimits", () => {
-  it("reports whether enabled extra usage still has capacity", () => {
-    for (const [is_enabled, utilization, allowed] of [
-      [true, 20, true],
-      [true, 100, false],
-      [false, 20, false],
-    ] as const) {
-      expect(
-        claudeUsageResponseToLimits({
-          checkedAt,
-          response: {
-            rate_limits_available: true,
-            rate_limits: {
-              five_hour: { utilization: 100, resets_at: null },
-              extra_usage: { is_enabled, utilization, monthly_limit: null, used_credits: null },
-            },
-          },
-        }).limits.overageAllowed,
-      ).toBe(allowed);
-    }
-  });
   it("maps the session, weekly, and model-scoped weekly windows", () => {
     expect(
       claudeUsageResponseToLimits({
@@ -55,7 +35,6 @@ describe("claudeUsageResponseToLimits", () => {
       names: { overageIncluded: "Fable" },
       limits: {
         checkedAt,
-        overageAllowed: false,
         windows: [
           {
             id: "five_hour",
@@ -161,7 +140,6 @@ describe("claudeUsageResponseToLimits", () => {
       {
         checkedAt,
         windows: [monthlyWindow],
-        overageAllowed: true,
       },
     );
     const response = {
@@ -246,22 +224,6 @@ describe("claudeUsageResponseToLimits", () => {
 });
 
 describe("claudeRateLimitEventToUpdate", () => {
-  it("updates overage permission even without a recognized usage window", () => {
-    for (const info of [
-      { status: "rejected", overageStatus: "allowed" },
-      { status: "rejected", overageStatus: "allowed_warning" },
-      { status: "rejected", isUsingOverage: true },
-      { status: "rejected", overageInUse: true },
-    ] as const) {
-      expect(claudeRateLimitEventToUpdate(info, noNames)).toEqual({
-        windows: [],
-        overageAllowed: true,
-      });
-    }
-    expect(
-      claudeRateLimitEventToUpdate({ status: "rejected", overageStatus: "rejected" }, noNames),
-    ).toEqual({ windows: [], overageAllowed: false });
-  });
   it("scales the 0–1 utilization and epoch-second reset onto the probe's window id", () => {
     expect(
       claudeRateLimitEventToUpdate(

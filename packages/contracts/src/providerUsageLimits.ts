@@ -32,7 +32,6 @@ export type ServerProviderResetCredits = typeof ServerProviderResetCredits.Type;
 export const ServerProviderUsageLimits = Schema.Struct({
   checkedAt: IsoDateTime,
   windows: ForwardCompatibleArray(ServerProviderUsageWindow),
-  overageAllowed: Schema.optional(Schema.Boolean),
   credentialFingerprint: Schema.optional(TrimmedNonEmptyString),
   resetCredits: Schema.optional(ServerProviderResetCredits),
   externalUsage: Schema.optional(
@@ -53,7 +52,6 @@ export type ServerProviderUsageLimits = typeof ServerProviderUsageLimits.Type;
 /** Partial updates merge windows by id; omitted windows remain unchanged. */
 export const ProviderUsageLimitsUpdate = Schema.Struct({
   windows: Schema.Array(ServerProviderUsageWindow),
-  overageAllowed: Schema.optional(Schema.Boolean),
 });
 export type ProviderUsageLimitsUpdate = typeof ProviderUsageLimitsUpdate.Type;
 

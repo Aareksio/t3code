@@ -43,6 +43,15 @@ export function cursorSdkFailureMessage(error: CursorAgentSdkRunnerError): strin
     : `Cursor Agent SDK ${error.method} failed: ${reason}`;
 }
 
+export function isCursorUsageLimitError(cause: unknown): boolean {
+  const error = isCursorAgentSdkRunnerError(cause) ? cause.cause : cause;
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (Reflect.get(error, "code") === "resource_exhausted" || Reflect.get(error, "status") === 429)
+  );
+}
+
 const GENERIC_SDK_ERROR_CODES = new Set(["", "error", "unknown"]);
 
 function sdkErrorReason(cause: unknown): string | undefined {

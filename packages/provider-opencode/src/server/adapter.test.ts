@@ -239,6 +239,75 @@ const makeOpenCodeRuntimeHarness = Effect.fn("makeOpenCodeRuntimeHarness")(funct
 });
 
 describe("OpenCodeAdapterV2", () => {
+  it.effect.each([
+    {
+      statusCode: 429,
+      headers: { "retry-after": "60" },
+      failureClass: "usage_limit",
+      resetAt: "1970-01-01T00:01:00.000Z",
+    },
+    {
+      statusCode: 429,
+      headers: { "retry-after": "Fri, 10 Apr 2026 12:00:00 GMT" },
+      failureClass: "usage_limit",
+      resetAt: "2026-04-10T12:00:00.000Z",
+    },
+    {
+      statusCode: 429,
+      headers: { "retry-after": "invalid" },
+      failureClass: "usage_limit",
+      resetAt: null,
+    },
+    { statusCode: 402, headers: {}, failureClass: "provider_error", resetAt: null },
+    { statusCode: 500, headers: {}, failureClass: "provider_error", resetAt: null },
+  ])(
+    "classifies APIError $statusCode with $headers",
+    ({ statusCode, headers, failureClass, resetAt }) =>
+      Effect.gen(function* () {
+        const nativeEvents = asyncEventStream();
+        const harness = yield* makeOpenCodeRuntimeHarness("usage-limit", "root", {
+          event: { subscribe: async () => ({ stream: nativeEvents.stream }) },
+          session: {
+            create: async () => ({ data: { id: "root", time: { created: 1, updated: 1 } } }),
+            promptAsync: async () => ({ data: true }),
+            abort: async () => ({ data: true }),
+            children: async () => ({ data: [] }),
+          },
+        });
+        yield* harness.startTurn();
+        const received = yield* harness.runtime.events.pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        yield* Effect.promise(() =>
+          nativeEvents.push({
+            type: "session.error",
+            properties: {
+              sessionID: "root",
+              error: {
+                name: "APIError",
+                data: {
+                  message: "Provider rejected request",
+                  statusCode,
+                  responseHeaders: headers,
+                  isRetryable: true,
+                },
+              },
+            },
+          }),
+        );
+        const terminal = (yield* Fiber.join(received)).find(
+          (event) => event.type === "turn.terminal",
+        );
+        assert.equal(terminal?.status, "failed");
+        assert.equal(terminal?.failure?.class, failureClass);
+        assert.equal(terminal?.failure?.resetAt ?? null, resetAt);
+      }).pipe(
+        Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
+        Effect.scoped,
+      ),
+  );
   it.effect.each(["completed", "failed", "unavailable"] as const)(
     "normalizes OpenCode step usage for %s turns",
     (ending) =>

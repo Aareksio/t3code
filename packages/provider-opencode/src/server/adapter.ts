@@ -841,6 +841,19 @@ function openCodeErrorMessage(event: Extract<OpenCodeEvent, { type: "session.err
   return recordString(error.data, "message") ?? error.name;
 }
 
+function openCodeUsageResetAt(
+  retryAfter: string | undefined,
+  now: DateTime.Utc,
+): string | undefined {
+  if (retryAfter === undefined) return undefined;
+  const resetMs = /^\d+$/.test(retryAfter.trim())
+    ? DateTime.toEpochMillis(now) + Number(retryAfter) * 1_000
+    : Date.parse(retryAfter);
+  return Number.isFinite(resetMs) && Math.abs(resetMs) <= 8.64e15
+    ? DateTime.formatIso(DateTime.makeUnsafe(resetMs))
+    : undefined;
+}
+
 function terminalStatusForError(
   event: Extract<OpenCodeEvent, { type: "session.error" }>,
   turn: ActiveOpenCodeTurn,
@@ -2632,6 +2645,14 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                       (state): state is OpenCodeThreadState => state !== undefined,
                     );
               const message = openCodeErrorMessage(event);
+              const error = event.properties.error;
+              const usageLimit = error?.name === "APIError" && error.data.statusCode === 429;
+              const resetAt = usageLimit
+                ? openCodeUsageResetAt(
+                    error.data.responseHeaders?.["retry-after"],
+                    yield* DateTime.now,
+                  )
+                : undefined;
               if (
                 !isMessageAbortedError(event) &&
                 (event.properties.sessionID === undefined ||
@@ -2648,8 +2669,9 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                     {
                       failure: makeProviderFailure({
                         message,
-                        code: event.properties.error?.name ?? null,
-                        class: "provider_error",
+                        code: error?.name ?? null,
+                        class: usageLimit ? "usage_limit" : "provider_error",
+                        resetAt: resetAt ?? null,
                       }),
                       threadDisposition:
                         event.properties.sessionID === undefined ? "broken" : "reusable",

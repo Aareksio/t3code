@@ -6,6 +6,7 @@ import {
   type ServerProvider,
 } from "@t3tools/contracts";
 import { createModelCapabilities } from "@t3tools/shared/model";
+import * as Cache from "effect/Cache";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -138,6 +139,51 @@ const enrichedSnapshotSecond: ServerProvider = {
 };
 
 describe("makeManagedServerProvider", () => {
+  it.effect("refreshes usage past a warmed capabilities cache without waiting for its TTL", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const calls = yield* Ref.make(0);
+        const cache = yield* Cache.makeWith(
+          () =>
+            Ref.updateAndGet(calls, (count) => count + 1).pipe(
+              Effect.map((count): ServerProvider => ({
+                ...refreshedSnapshot,
+                driver: ProviderDriverKind.make("claudeAgent"),
+                usageLimits: {
+                  checkedAt: refreshedSnapshot.checkedAt,
+                  windows: [
+                    {
+                      id: "five_hour",
+                      kind: "session",
+                      label: "Session",
+                      usedPercent: count === 1 ? 20 : 100,
+                    },
+                  ],
+                },
+              })),
+            ),
+          { capacity: 1, timeToLive: () => "5 minutes" },
+        );
+        const warmed = yield* Cache.get(cache, "claude");
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          resolveMaintenance: () => Effect.succeed(maintenanceCapabilities),
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.empty,
+          haveSettingsChanged: () => false,
+          initialSnapshot: () => Effect.succeed(warmed),
+          checkProvider: Cache.get(cache, "claude"),
+          invalidateUsageCache: Cache.invalidateAll(cache),
+          refreshOnInterval: false,
+        });
+        yield* provider.refresh;
+        assert.strictEqual(yield* Ref.get(calls), 1);
+        assert.strictEqual((yield* provider.getSnapshot).usageLimits?.windows[0]?.usedPercent, 20);
+        yield* provider.refreshUsage!;
+        assert.strictEqual(yield* Ref.get(calls), 2);
+        assert.strictEqual((yield* provider.getSnapshot).usageLimits?.windows[0]?.usedPercent, 100);
+      }),
+    ).pipe(Effect.provide(layerAlwaysRunTest)),
+  );
   it.effect("refreshes usage on demand and skips probes already in flight or unsupported", () =>
     Effect.scoped(
       Effect.gen(function* () {

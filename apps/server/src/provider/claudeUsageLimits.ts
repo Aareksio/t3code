@@ -156,29 +156,19 @@ export function claudeRateLimitEventToUpdate(
   info: SDKRateLimitInfo,
   names: ClaudeScopedLimitNames,
 ): ProviderUsageLimitsUpdate | undefined {
-  const overageAllowed =
-    info.overageStatus === "allowed" ||
-    info.overageStatus === "allowed_warning" ||
-    info.isUsingOverage === true ||
-    info.overageInUse === true
-      ? true
-      : info.overageStatus === "rejected" || info.status === "rejected"
-        ? false
-        : undefined;
   const type: string | undefined = info.rateLimitType;
-  const windows: ServerProviderUsageWindow[] = [];
-  if (type && typeof info.utilization === "number") {
-    const usedPercent = info.utilization * 100;
-    const resetsAt = isoFromEpochSeconds(info.resetsAt);
-    if (type in WINDOWS) {
-      windows.push(makeWindow(type, usedPercent, resetsAt));
-    } else if (type === OVERAGE_INCLUDED_EVENT_TYPE && names.overageIncluded) {
-      windows.push(scopedWindow(names.overageIncluded, usedPercent, resetsAt));
-    }
+  if (!type || typeof info.utilization !== "number") {
+    return undefined;
   }
-  return windows.length || overageAllowed !== undefined
-    ? { windows, ...(overageAllowed !== undefined ? { overageAllowed } : {}) }
-    : undefined;
+  const usedPercent = info.utilization * 100;
+  const resetsAt = isoFromEpochSeconds(info.resetsAt);
+  if (type in WINDOWS) {
+    return { windows: [makeWindow(type, usedPercent, resetsAt)] };
+  }
+  if (type === OVERAGE_INCLUDED_EVENT_TYPE && names.overageIncluded) {
+    return { windows: [scopedWindow(names.overageIncluded, usedPercent, resetsAt)] };
+  }
+  return undefined;
 }
 
 /** get_usage percentages are already 0-100. */
@@ -221,14 +211,7 @@ export function claudeUsageResponseToLimits(input: {
     });
   }
   return {
-    limits: {
-      ...makeUsageLimits({ checkedAt, windows }),
-      ...(spendPercent !== undefined
-        ? { overageAllowed: spendPercent < 100 }
-        : response.rate_limits.extra_usage?.is_enabled === false
-          ? { overageAllowed: false }
-          : {}),
-    },
+    limits: makeUsageLimits({ checkedAt, windows }),
     names: { overageIncluded },
   };
 }

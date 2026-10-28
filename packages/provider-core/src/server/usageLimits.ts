@@ -53,16 +53,12 @@ export function applyUsageLimitsUpdate(input: {
   readonly checkedAt: string;
 }): ServerProviderUsageLimits | undefined {
   const { previous, update } = input;
-  if (
-    (update.windows.length === 0 && update.overageAllowed === undefined) ||
-    previous?.unavailable?.reason === "unsupported"
-  ) {
+  if (update.windows.length === 0 || previous?.unavailable?.reason === "unsupported") {
     return previous;
   }
   const merged = new Map(previous?.windows.map((window) => [window.id, window] as const));
   // Codex repeats unchanged limits on token ticks; avoid allocating snapshots for no-ops.
-  const overageAllowed = update.overageAllowed ?? previous?.overageAllowed;
-  let changed = overageAllowed !== previous?.overageAllowed;
+  let changed = false;
   for (const window of update.windows) {
     const existing = merged.get(window.id);
     const next: ServerProviderUsageWindow = {
@@ -87,7 +83,6 @@ export function applyUsageLimitsUpdate(input: {
     previous === undefined ? { reason: "probeFailed" as const } : previous.unavailable;
   return {
     ...makeUsageLimits({ checkedAt: input.checkedAt, windows: merged.values() }),
-    ...(overageAllowed !== undefined ? { overageAllowed } : {}),
     ...(previous?.resetCredits !== undefined ? { resetCredits: previous.resetCredits } : {}),
     ...(unavailable !== undefined ? { unavailable } : {}),
   };
@@ -119,15 +114,7 @@ export function resolveUsageLimitsAfterProbe(input: {
     !probed.unavailable &&
     Date.parse(published.checkedAt) > Date.parse(probed.checkedAt)
   ) {
-    const { overageAllowed: _probedOverage, ...rest } = probed;
-    return {
-      ...rest,
-      checkedAt: published.checkedAt,
-      windows: published.windows,
-      ...(published.overageAllowed !== undefined
-        ? { overageAllowed: published.overageAllowed }
-        : {}),
-    };
+    return { ...probed, checkedAt: published.checkedAt, windows: published.windows };
   }
   return probed;
 }

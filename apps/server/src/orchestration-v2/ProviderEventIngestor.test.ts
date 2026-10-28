@@ -365,7 +365,11 @@ it.effect("refreshes the failing instance snapshot after a committed usage_limit
               status: "failed",
               failure: makeProviderFailure({
                 class: failureClass,
-                message: "Provider rejected turn.",
+                ...(failureClass === "usage_limit" ? { code: "resource_exhausted" } : {}),
+                message:
+                  failureClass === "usage_limit"
+                    ? "Usage limit reached"
+                    : "Provider rejected turn.",
               }),
               threadDisposition: "reusable",
             },

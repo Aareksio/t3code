@@ -1,5 +1,6 @@
 import type {
   DesktopTelemetryRequestDesktopUpdate,
+  DesktopUpdateChannel,
   DesktopUpdateRemoteOutcome,
   DesktopUpdateState,
 } from "@t3tools/contracts";
@@ -7,9 +8,12 @@ import * as Duration from "effect/Duration";
 import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as Schedule from "effect/Schedule";
+import { desktopUpdateChannelOf } from "@t3tools/shared/cliRelease";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
@@ -26,6 +30,8 @@ const { logInfo, logError } = DesktopObservability.makeComponentLogger("desktop-
 
 const ACTION_RETRY_DELAY = Duration.millis(250);
 const PREPARED_UPDATE_TTL = Duration.minutes(5);
+const CHANNEL_SWITCH_RETRY_DELAY = Duration.seconds(1);
+const CHANNEL_SWITCH_RETRIES = 30;
 
 interface PreparedUpdate {
   readonly requestId: string;
@@ -33,10 +39,12 @@ interface PreparedUpdate {
   readonly status: "prepared" | "committing" | "failed";
   readonly failureReason?: string;
   readonly expiresAt: number;
+  /** The track a switching request left; restored if this install fails. */
+  readonly restoreChannel?: DesktopUpdateChannel;
 }
 
 type CommitClaim =
-  | { readonly _tag: "invalid" }
+  | { readonly _tag: "invalid"; readonly expired?: PreparedUpdate }
   | { readonly _tag: "failed"; readonly prepared: PreparedUpdate }
   | { readonly _tag: "committing" }
   | { readonly _tag: "claimed"; readonly prepared: PreparedUpdate };
@@ -57,6 +65,7 @@ export const listen: Effect.Effect<
     readonly cancelledBeforeStart: ReadonlyArray<string>;
   }>({ active: Option.none(), cancelledBeforeStart: [] });
   const preparedUpdateRef = yield* Ref.make(Option.none<PreparedUpdate>());
+  const pendingRestoreRef = yield* Ref.make(Option.none<Fiber.Fiber<void>>());
 
   const publishReport = (
     state: DesktopUpdateState,
@@ -82,20 +91,52 @@ export const listen: Effect.Effect<
     );
   };
 
-  const recordPreparedFailure = (requestId: string, reason: string) =>
-    Ref.modify(preparedUpdateRef, (prepared) => {
+  // Updater actions hold the channel briefly; wait them out instead of failing.
+  const setChannelWhenIdle = (channel: DesktopUpdateChannel) =>
+    updates.setChannel(channel).pipe(
+      Effect.retry({
+        while: (error) => error._tag === "DesktopUpdateActionInProgressError",
+        schedule: Schedule.spaced(CHANNEL_SWITCH_RETRY_DELAY),
+        times: CHANNEL_SWITCH_RETRIES,
+      }),
+    );
+
+  // A switch whose build never installs puts back the track it left.
+  const restoreTrack = (prepared: PreparedUpdate) =>
+    prepared.restoreChannel === undefined
+      ? Effect.void
+      : setChannelWhenIdle(prepared.restoreChannel).pipe(Effect.ignore);
+
+  // Restores run in the background (a failed install still holds the updater). The next request
+  // waits for the latest one, so a late restore can never overwrite that request's track.
+  const scheduleRestore = (prepared: PreparedUpdate) =>
+    Effect.forkDetach(restoreTrack(prepared)).pipe(
+      Effect.flatMap((fiber) => Ref.set(pendingRestoreRef, Option.some(fiber))),
+    );
+
+  const failPrepared = Effect.fn("DesktopRemoteUpdates.failPrepared")(function* (
+    requestId: string,
+    reason: string,
+    state: DesktopUpdateState,
+  ) {
+    const failed = yield* Ref.modify(preparedUpdateRef, (prepared) => {
       if (
         Option.isNone(prepared) ||
         prepared.value.requestId !== requestId ||
         prepared.value.status === "failed"
       ) {
-        return [false, prepared] as const;
+        return [Option.none<PreparedUpdate>(), prepared] as const;
       }
       return [
-        true,
+        prepared,
         Option.some({ ...prepared.value, status: "failed" as const, failureReason: reason }),
       ] as const;
     });
+    if (Option.isNone(failed)) return;
+    // Scheduled before the failure is reported, so the next request already waits for it.
+    yield* scheduleRestore(failed.value);
+    yield* publishReport(state, { outcome: "failed", reason }, requestId);
+  });
 
   const clearActiveRequest = (requestId: string) =>
     Ref.update(activeRequestIdRef, (active) =>
@@ -116,9 +157,7 @@ export const listen: Effect.Effect<
             state.errorContext === "install"
           ) {
             const reason = state.message ?? "The desktop app failed to install the update.";
-            if (yield* recordPreparedFailure(prepared.value.requestId, reason)) {
-              yield* publishReport(state, { outcome: "failed", reason }, prepared.value.requestId);
-            }
+            yield* failPrepared(prepared.value.requestId, reason, state);
           }
         }),
       );
@@ -151,14 +190,18 @@ export const listen: Effect.Effect<
         });
         if (!shouldStart) return;
 
+        const pendingRestore = yield* Ref.getAndSet(pendingRestoreRef, Option.none());
+        if (Option.isSome(pendingRestore)) yield* Fiber.await(pendingRestore.value);
         const now = yield* Clock.currentTimeMillis;
-        const prepared = yield* Ref.modify(preparedUpdateRef, (current) =>
+        const [expired, prepared] = yield* Ref.modify(preparedUpdateRef, (current) =>
           Option.isSome(current) &&
           current.value.status === "prepared" &&
           current.value.expiresAt <= now
-            ? ([Option.none<typeof current.value>(), Option.none()] as const)
-            : ([current, current] as const),
+            ? ([[current, Option.none<PreparedUpdate>()], Option.none()] as const)
+            : ([[Option.none<PreparedUpdate>(), current], current] as const),
         );
+        // Restore before this request picks its own track, so the two cannot race.
+        if (Option.isSome(expired)) yield* restoreTrack(expired.value);
         if (Option.isSome(prepared) && prepared.value.status !== "failed") {
           yield* publishReport(
             yield* updates.getState,
@@ -171,7 +214,32 @@ export const listen: Effect.Effect<
           return;
         }
         yield* Ref.set(activeRequestIdRef, Option.some(request.requestId));
-        yield* logInfo("remote update requested", { requestId: request.requestId });
+        yield* logInfo("remote update requested", {
+          requestId: request.requestId,
+          channel: request.channel,
+        });
+        // Switch before subscribing so the step machine never sees the old track's offer.
+        const previousChannel = (yield* updates.getState).channel;
+        // Set once this request prepares its build; otherwise a track switch is undone.
+        let keepsTrack = request.channel === undefined;
+        if (request.channel !== undefined) {
+          const switched = yield* setChannelWhenIdle(request.channel).pipe(
+            Effect.as(true),
+            Effect.catch((error) =>
+              updates.getState.pipe(
+                Effect.flatMap((state) =>
+                  publishReport(
+                    state,
+                    { outcome: "failed", reason: error.message },
+                    request.requestId,
+                  ),
+                ),
+                Effect.as(false),
+              ),
+            ),
+          );
+          if (!switched) return;
+        }
         const { latest, changes } = yield* updates.subscribe;
         const disabledReason = Option.getOrNull(yield* updates.disabledReason);
         let attempts: RemoteDesktopUpdateAttempts = { checks: 0, downloads: 0 };
@@ -184,16 +252,39 @@ export const listen: Effect.Effect<
             Effect.forkScoped,
           );
 
+        // Only a host crossing tracks needs the exact database-checked release, or an older one.
+        const crossing = (state: DesktopUpdateState) =>
+          request.targetVersion !== undefined &&
+          request.channel !== undefined &&
+          desktopUpdateChannelOf(state.currentVersion) !== request.channel;
         const step = Effect.fn("DesktopRemoteUpdates.step")(function* (
           state: DesktopUpdateState,
         ): Effect.fn.Return<boolean, never, Scope.Scope> {
-          const next = nextRemoteDesktopUpdateStep(state, attempts, disabledReason);
+          // A track switch was checked against one release; refuse any other before downloading,
+          // but only after this request's own check, since a cached offer can be stale.
+          const found = state.downloadedVersion ?? state.availableVersion;
+          const mismatched = crossing(state) && found !== null && found !== request.targetVersion;
+          if (mismatched && attempts.checks > 0 && state.status !== "checking") {
+            yield* publishReport(
+              state,
+              {
+                outcome: "failed",
+                reason: `The desktop app found ${found}, not ${request.targetVersion}. Try again in a few minutes.`,
+              },
+              request.requestId,
+            );
+            return true;
+          }
+          const next = mismatched
+            ? ({ action: attempts.checks === 0 ? "check" : "wait" } as const)
+            : nextRemoteDesktopUpdateStep(state, attempts, disabledReason);
           switch (next.action) {
             case "wait":
               return false;
             case "check":
               attempts = { ...attempts, checks: attempts.checks + 1 };
-              yield* updates.check("remote-update").pipe(
+              // Only a guarded crossing may be offered an older release.
+              yield* updates.check("remote-update", { allowDowngrade: crossing(state) }).pipe(
                 Effect.flatMap((result) => {
                   if (result.checked) return Effect.void;
                   attempts = { ...attempts, checks: attempts.checks - 1 };
@@ -240,27 +331,40 @@ export const listen: Effect.Effect<
                   status: "prepared",
                   expiresAt:
                     (yield* Clock.currentTimeMillis) + Duration.toMillis(PREPARED_UPDATE_TTL),
+                  ...(keepsTrack || previousChannel === request.channel
+                    ? {}
+                    : { restoreChannel: previousChannel }),
                 }),
               );
+              keepsTrack = true;
               yield* publishReport(state, { outcome: "ready-to-install" }, request.requestId);
               yield* logInfo("remote update prepared", { requestId: request.requestId });
               return true;
             }
-            case "done":
+            case "done": {
+              // For a switch, "up to date" means the feed has no build of the checked release.
+              const done =
+                request.targetVersion !== undefined && next.outcome === "up-to-date"
+                  ? {
+                      outcome: "failed" as const,
+                      reason: `The desktop app found no build of ${request.targetVersion}.`,
+                    }
+                  : next;
               yield* publishReport(
                 state,
                 {
-                  outcome: next.outcome,
-                  ...(next.reason === undefined ? {} : { reason: next.reason }),
+                  outcome: done.outcome,
+                  ...(done.reason === undefined ? {} : { reason: done.reason }),
                 },
                 request.requestId,
               );
               yield* logInfo("remote update finished", {
                 requestId: request.requestId,
-                outcome: next.outcome,
-                reason: next.reason ?? null,
+                outcome: done.outcome,
+                reason: done.reason ?? null,
               });
               return true;
+            }
           }
         });
 
@@ -275,8 +379,13 @@ export const listen: Effect.Effect<
           }),
           Deferred.await(cancellation),
         );
+        // Restored after the scope closes, once this request's own check and download stop.
+        return !keepsTrack && previousChannel !== request.channel ? previousChannel : undefined;
       }),
     ).pipe(
+      Effect.flatMap((restore) =>
+        restore === undefined ? Effect.void : setChannelWhenIdle(restore).pipe(Effect.ignore),
+      ),
       Effect.ensuring(
         Effect.all(
           [
@@ -330,11 +439,14 @@ export const listen: Effect.Effect<
       }
       const matchedPrepared = yield* Ref.modify(preparedUpdateRef, (prepared) => {
         if (Option.isNone(prepared) || prepared.value.requestId !== cancellation.requestId) {
-          return [false, prepared] as const;
+          return [Option.none<PreparedUpdate>(), prepared] as const;
         }
-        return [true, prepared.value.status === "prepared" ? Option.none() : prepared] as const;
+        return [prepared, prepared.value.status === "prepared" ? Option.none() : prepared] as const;
       });
-      if (matchedPrepared) {
+      if (Option.isSome(matchedPrepared)) {
+        if (matchedPrepared.value.status === "prepared") {
+          yield* scheduleRestore(matchedPrepared.value);
+        }
         yield* Ref.update(requestControlRef, (control) => {
           return {
             ...control,
@@ -354,12 +466,11 @@ export const listen: Effect.Effect<
       const claim = yield* Ref.modify(
         preparedUpdateRef,
         (prepared): readonly [CommitClaim, Option.Option<PreparedUpdate>] => {
-          if (
-            Option.isNone(prepared) ||
-            prepared.value.requestId !== commit.requestId ||
-            (prepared.value.status === "prepared" && prepared.value.expiresAt <= now)
-          ) {
+          if (Option.isNone(prepared) || prepared.value.requestId !== commit.requestId) {
             return [{ _tag: "invalid" as const }, prepared] as const;
+          }
+          if (prepared.value.status === "prepared" && prepared.value.expiresAt <= now) {
+            return [{ _tag: "invalid" as const, expired: prepared.value }, Option.none()] as const;
           }
           if (prepared.value.status === "failed") {
             return [{ _tag: "failed" as const, prepared: prepared.value }, prepared] as const;
@@ -374,6 +485,7 @@ export const listen: Effect.Effect<
         },
       );
       if (claim._tag === "invalid") {
+        if (claim.expired !== undefined) yield* scheduleRestore(claim.expired);
         yield* publishReport(
           yield* updates.getState,
           {
@@ -401,9 +513,7 @@ export const listen: Effect.Effect<
       yield* Ref.set(activeRequestIdRef, Option.some(commit.requestId));
       if (current.downloadedVersion !== claim.prepared.downloadedVersion) {
         const reason = "This desktop update is no longer prepared.";
-        if (yield* recordPreparedFailure(commit.requestId, reason)) {
-          yield* publishReport(current, { outcome: "failed", reason }, commit.requestId);
-        }
+        yield* failPrepared(commit.requestId, reason, current);
         return;
       }
       const result = yield* updates.installPrepared(claim.prepared.downloadedVersion);
@@ -420,9 +530,7 @@ export const listen: Effect.Effect<
       }
       if (!result.accepted || result.failed) {
         const reason = result.state.message ?? "The desktop app could not start the install.";
-        if (yield* recordPreparedFailure(commit.requestId, reason)) {
-          yield* publishReport(result.state, { outcome: "failed", reason }, commit.requestId);
-        }
+        yield* failPrepared(commit.requestId, reason, result.state);
         return;
       }
       // Installation kills this backend; only transport loss followed by the target version proves handoff.

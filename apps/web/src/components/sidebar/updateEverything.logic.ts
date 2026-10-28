@@ -1,6 +1,12 @@
 import type { ServerUpdateState } from "@t3tools/client-runtime/state/server";
-import type { EnvironmentId, ServerConfig } from "@t3tools/contracts";
-import { cliReleaseChannelOf } from "@t3tools/shared/cliRelease";
+import type {
+  DesktopUpdateChannel,
+  EnvironmentId,
+  ServerConfig,
+  ServerSelfUpdateCapability,
+} from "@t3tools/contracts";
+import { cliReleaseChannelOf, desktopUpdateChannelOf } from "@t3tools/shared/cliRelease";
+import { compareSemverVersions } from "@t3tools/shared/semver";
 
 import {
   resolveServerSelfUpdateCapability,
@@ -76,16 +82,9 @@ export function collectServerUpdateTargets(
     }
     const skip = (reason: string) =>
       skipped.push({ environmentId: machine.environmentId, label: machine.label, reason });
-    if (config === null || !machine.connected) {
-      skip("not connected");
-      continue;
-    }
-    if (!machine.canMaintain) {
-      skip("no permission");
-      continue;
-    }
-    if (machine.updateState.status === "running") {
-      skip("already updating");
+    const unavailable = unavailableReason(machine);
+    if (config === null || unavailable !== null) {
+      skip(unavailable ?? "not connected");
       continue;
     }
     const selfUpdate = resolveServerSelfUpdateCapability(config);
@@ -116,6 +115,144 @@ export function collectServerUpdateTargets(
     });
   }
   return { targets, skipped };
+}
+
+function unavailableReason(machine: UpdateEverythingMachine): string | null {
+  if (machine.serverConfig === null || !machine.connected) return "not connected";
+  if (!machine.canMaintain) return "no permission";
+  if (machine.updateState.status === "running") return "already updating";
+  return null;
+}
+
+/** The latest release on the track a fleet switches to, as npm reports it. */
+export interface ChannelSwitchRelease {
+  readonly channel: DesktopUpdateChannel;
+  readonly version: string;
+  readonly databaseMigration: number | undefined;
+}
+
+export const channelSwitchLabel = (channel: DesktopUpdateChannel) =>
+  channel === "nightly" ? "Nightly" : "Stable";
+
+/** Nightly databases can hold migrations that stable does not have yet. Leaving nightly needs
+ * proof that the target release knows every migration the host's current release ran. */
+export function channelSwitchBlockReason(
+  fromVersion: string,
+  release: ChannelSwitchRelease,
+  currentMigration: number | undefined,
+): string | null {
+  if (release.channel === "nightly" || cliReleaseChannelOf(fromVersion) !== "nightly") return null;
+  // Releases from before this check carry no migration number.
+  if (currentMigration === undefined) {
+    return `its release predates database checks; update it on Nightly first`;
+  }
+  if (release.databaseMigration === undefined) {
+    return `${release.version} predates database checks; wait for a newer Stable release`;
+  }
+  return currentMigration > release.databaseMigration
+    ? `its database has changes ${release.version} does not support yet; stay on Nightly until Stable has them`
+    : null;
+}
+
+/** Servers move to the release; desktop-managed hosts reinstall their app on its track. */
+export function collectChannelSwitchTargets(
+  machines: ReadonlyArray<UpdateEverythingMachine>,
+  release: ChannelSwitchRelease,
+  migrationOf: (version: string) => number | undefined,
+): { readonly targets: ServerUpdateTarget[]; readonly skipped: SkippedMachine[] } {
+  const targets: ServerUpdateTarget[] = [];
+  const skipped: SkippedMachine[] = [];
+  for (const machine of machines) {
+    const config = machine.serverConfig;
+    if (machine.hostedByThisApp) continue;
+    const sameTrack =
+      config !== null && isOnTrack(config.environment.serverVersion, release.channel);
+    if (
+      sameTrack &&
+      resolveVersionMismatch(config.environment.serverVersion, release.version) === null
+    ) {
+      continue;
+    }
+    const skip = (reason: string) =>
+      skipped.push({ environmentId: machine.environmentId, label: machine.label, reason });
+    const unavailable = unavailableReason(machine);
+    if (config === null || unavailable !== null) {
+      skip(unavailable ?? "not connected");
+      continue;
+    }
+    const serverVersion = config.environment.serverVersion;
+    const move = trackSwitchMove(config, sameTrack);
+    const blocked = channelSwitchBlockReason(serverVersion, release, migrationOf(serverVersion));
+    if ("skip" in move) {
+      skip(move.skip);
+      continue;
+    }
+    if (blocked !== null) {
+      skip(blocked);
+      continue;
+    }
+    const { selfUpdate } = move;
+    // Service launchers only accept newer versions, so leaving for an older release is manual.
+    if (
+      selfUpdate === "boot-service" &&
+      compareSemverVersions(release.version, serverVersion) <= 0
+    ) {
+      skip(
+        `run \`t3 update --channel ${release.channel === "nightly" ? "nightly" : "stable"} --allow-downgrade\` there`,
+      );
+      continue;
+    }
+    targets.push({
+      environmentId: machine.environmentId,
+      serverLabel: machine.label,
+      selfUpdate,
+      installation: config.environment.capabilities.serverInstallation,
+      desktopAppUpdate: supportsDesktopAppUpdate(config),
+      targetVersion: release.version,
+      // Even a host already on the track may have the other track saved; pin both.
+      ...(selfUpdate === "desktop-managed" ? { channel: release.channel } : {}),
+    });
+  }
+  return { targets, skipped };
+}
+
+/** A remote host on the other track that a switch can still move, for retrying a partial switch. */
+export function awaitsTrackSwitch(
+  machine: Pick<UpdateEverythingMachine, "serverConfig" | "hostedByThisApp">,
+  channel: DesktopUpdateChannel,
+): boolean {
+  const config = machine.serverConfig;
+  return (
+    !machine.hostedByThisApp &&
+    config !== null &&
+    !isOnTrack(config.environment.serverVersion, channel) &&
+    !("skip" in trackSwitchMove(config, false))
+  );
+}
+
+function isOnTrack(version: string, channel: DesktopUpdateChannel): boolean {
+  return cliReleaseChannelOf(version) !== "preview" && desktopUpdateChannelOf(version) === channel;
+}
+
+/** How a switch moves a host, or why it never can from here, whatever the release. */
+function trackSwitchMove(
+  config: NonNullable<UpdateEverythingMachine["serverConfig"]>,
+  sameTrack: boolean,
+): { readonly selfUpdate: ServerSelfUpdateCapability } | { readonly skip: string } {
+  if (cliReleaseChannelOf(config.environment.serverVersion) === "preview") {
+    return { skip: "runs a preview build" };
+  }
+  const selfUpdate = resolveServerSelfUpdateCapability(config);
+  if (selfUpdate === null) return { skip: "needs a manual update" };
+  if (selfUpdate !== "desktop-managed") return { selfUpdate };
+  if (config.environment.capabilities.desktopAppChannelSwitch !== true) {
+    return { skip: "needs a newer desktop app" };
+  }
+  // Squirrel.Mac renames the bundle for the new track and then cannot relaunch it.
+  if (!sameTrack && config.environment.platform.os === "darwin") {
+    return { skip: "switch the Mac app on that Mac" };
+  }
+  return { selfUpdate };
 }
 
 export interface UpdateEverythingSteps<Providers, Servers> {
@@ -163,6 +300,8 @@ export interface UpdateRunMachine {
 }
 
 export interface UpdateEverythingRun {
+  /** Track switches retry through their planner, which re-checks each database. */
+  readonly trackSwitch?: boolean;
   readonly localVersion: string | null;
   readonly phase: "providers" | "servers" | "countdown" | "installing";
   readonly restartAt: number | null;
@@ -265,7 +404,10 @@ export function describeUpdateCapsule(
     return {
       tone: "failed",
       label: failed.length === 1 ? `${failed[0]!.machine.label} failed` : `${failed.length} failed`,
-      action: failed.some(({ machine }) => machine.server !== null) ? "retry" : "dismiss",
+      action:
+        !run.trackSwitch && failed.some(({ machine }) => machine.server !== null)
+          ? "retry"
+          : "dismiss",
     };
   }
   return { tone: "default", label: `${done} of ${machines.length} updated`, action: null };

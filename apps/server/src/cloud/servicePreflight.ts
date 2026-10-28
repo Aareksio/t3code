@@ -1,4 +1,7 @@
+import * as NodeSqlite from "node:sqlite";
+
 import packageJson from "../../package.json" with { type: "json" };
+import { migrationManifest } from "../persistence/Migrations.ts";
 import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
 
 export type ServicePreflightResult =
@@ -34,7 +37,43 @@ export function runServicePreflight(input: {
     };
   }
 
+  const newer = newerRecordedMigrations(input.databasePath);
+  if (newer.length > 0) {
+    return {
+      status: "blocked",
+      version,
+      reason: `This database has migrations that t3@${version} does not know: ${newer.join(", ")}. A newer build wrote them, and running t3@${version} on this database is not safe. Stay on the newer release, or wait for a release that includes these migrations.`,
+    };
+  }
+
   return { status: "ready", version, launcherProtocol: SERVICE_LAUNCHER_PROTOCOL };
+}
+
+/** Migrations a newer build recorded. Startup already handles renamed ids this build knows. */
+function newerRecordedMigrations(databasePath: string): ReadonlyArray<string> {
+  let db: NodeSqlite.DatabaseSync;
+  try {
+    db = new NodeSqlite.DatabaseSync(databasePath, { readOnly: true });
+  } catch {
+    return [];
+  }
+  try {
+    const hasTable = db
+      .prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'",
+      )
+      .get();
+    if (hasTable === undefined) return [];
+    const latestKnownId = Math.max(...migrationManifest.map(([id]) => id));
+    return db
+      .prepare(
+        "SELECT migration_id, name FROM effect_sql_migrations WHERE migration_id > ? ORDER BY migration_id",
+      )
+      .all(latestKnownId)
+      .map((row) => `${String(row.migration_id)}_${String(row.name)}`);
+  } finally {
+    db.close();
+  }
 }
 
 export function decodeServicePreflightResult(value: unknown): ServicePreflightResult | undefined {

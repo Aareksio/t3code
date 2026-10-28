@@ -694,6 +694,65 @@ describe("DesktopUpdates", () => {
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
 
+  it.effect("ignores a finished download from a track it no longer follows", () => {
+    const harness = makeHarness();
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        // A backed-out switch's download keeps reporting progress until it finishes.
+        harness.emit("download-progress", { percent: 40 });
+        yield* flushCallbacks;
+        harness.emit("update-downloaded", { version: "1.2.4-nightly.20261027.1" });
+        yield* flushCallbacks;
+
+        const state = yield* updates.getState;
+        assert.equal(state.downloadedVersion, null);
+        assert.notEqual(state.status, "downloading");
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
+  it.effect("offers older releases only to checks that leave the running build's track", () => {
+    const harness = makeHarness({ beforeSetUpdateChannel: Effect.void });
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        const before = harness.checkAllowedDowngrade.length;
+        yield* updates.setChannel("nightly");
+        yield* updates.setChannel("latest");
+        yield* updates.check("remote-update", { allowDowngrade: true });
+
+        // Back on its own Stable track the build never needs an older release.
+        assert.deepEqual(harness.checkAllowedDowngrade.slice(before), [true, false, true]);
+        assert.isFalse(harness.allowDowngrade());
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
+  it.effect("re-checks a saved track that differs from the running build's track", () => {
+    const harness = makeHarness({
+      appVersion: "1.2.4-nightly.20261027.1",
+      beforeSetUpdateChannel: Effect.void,
+    });
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        yield* updates.setChannel("latest");
+        const checks = harness.checkCount();
+
+        yield* updates.setChannel("latest");
+
+        assert.equal(harness.checkCount(), checks + 1);
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
   it.effect("does not persist an unchanged update channel as a user preference", () => {
     const harness = makeHarness();
 

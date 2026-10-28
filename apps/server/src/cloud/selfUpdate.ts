@@ -124,7 +124,12 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
   )(function* (input, reportProgress = () => Effect.void, onHandoffAccepted = () => Effect.void) {
     if (capability === "desktop-managed") {
       if (desktopAppUpdate.available) {
-        return yield* desktopAppUpdate.run(reportProgress);
+        return yield* desktopAppUpdate.run(
+          reportProgress,
+          input.channel === undefined
+            ? undefined
+            : { channel: input.channel, targetVersion: input.targetVersion },
+        );
       }
       return yield* failWith(
         "This server is managed by the T3 Code desktop app on its machine; update the desktop app to update it.",

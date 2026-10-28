@@ -7,6 +7,7 @@ import {
 import type { AsyncResult } from "effect/reactivity";
 import { environmentSession } from "~/state/session";
 import type {
+  DesktopUpdateChannel,
   EnvironmentId,
   ServerInstallation,
   ServerSelfUpdateCapability,
@@ -52,6 +53,8 @@ export interface ServerUpdateTarget {
   readonly installation?: ServerInstallation | undefined;
   readonly desktopAppUpdate?: boolean;
   readonly targetVersion: string;
+  /** Set only by a track switch; the host's desktop app moves to this track. */
+  readonly channel?: DesktopUpdateChannel;
 }
 
 type UpdateButtonProps = Pick<ComponentProps<typeof Button>, "variant" | "size" | "className"> & {
@@ -79,7 +82,10 @@ export function useServerUpdate() {
     pendingUpdateEnvironmentIds.add(environmentId);
     const result = await updateServer({
       environmentId,
-      input: { targetVersion },
+      input: {
+        targetVersion,
+        ...(target.channel === undefined ? {} : { channel: target.channel }),
+      },
     });
     pendingUpdateEnvironmentIds.delete(environmentId);
     if (result._tag === "Failure") {

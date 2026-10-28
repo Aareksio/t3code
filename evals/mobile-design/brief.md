@@ -38,6 +38,8 @@ Device classes, by id:
 
 {{DEVICES}}
 
+Then say what feels worse, blander or less clear than it should, and what works well and must stay as it is. Name the screen and device for each.
+
 Then list the five fixes that would raise the scores most, most important first. Each fix names the screen and device, what is wrong, and the change you would make. Be specific: "the question panel leaves a 120 pt scroll area on the closed Duo; let it take the space above the composer" is useful, "improve spacing" is not.
 
 ## Reply format

@@ -290,7 +290,7 @@ export const FLOWS = [
     title: "Start a thread in a chosen project and machine",
     source: REQUEST,
     steps: [
-      { tap: "^New chat$" },
+      { tap: "^(New chat|New thread)$", name: "New thread" },
       { tap: "^T3 Code$" },
       { tap: "^React$" },
       { tap: "^Choose environment" },
@@ -319,8 +319,8 @@ export const FLOWS = [
     source: REQUEST,
     steps: [
       { tap: "^Make remote coding feel local" },
-      { tap: "^Git$" },
-      { tap: "^Review changes" },
+      { tap: "^(Git|Toggle panel)$", name: "Git or Panel" },
+      { tap: "^(Review changes|Diff$)", name: "Review changes or Diff" },
     ],
   },
   {
@@ -333,7 +333,11 @@ export const FLOWS = [
     id: "find-old-thread",
     title: "Find an old thread",
     source: REQUEST,
-    steps: [{ tap: "^Search$" }, { type: "OOM" }, { tap: "OOM killer" }],
+    steps: [
+      { tap: "^(Search|Search threads)$", name: "Search" },
+      { type: "OOM" },
+      { tap: "OOM killer" },
+    ],
   },
   {
     id: "change-model",

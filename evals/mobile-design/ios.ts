@@ -164,7 +164,7 @@ export class Simulator {
     ] as const) {
       await simctl("spawn", this.udid, "defaults", "write", BUNDLE_ID, key, "-bool", value);
     }
-    const loaded = /^(Chats|Add environment|New chat|Search threads)$/;
+    const loaded = /^(Chats|Threads|Add environment|New chat|New thread|Search threads)$/;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       // Launch arguments only reach a fresh process, so start it before agent-device attaches.
       await simctl(
@@ -351,8 +351,12 @@ export class Simulator {
       const back = snapshot.nodes.find(
         (node) =>
           node.kind === "button" &&
-          (/^(Back|Close|Done|Cancel)$/.test(node.label ?? "") ||
-            (node.label === "Chats" && (node.rect?.y ?? Infinity) < snapshot.viewport.height / 4)),
+          (/^(Back|Close|Done|Cancel|Go to threads list|Back to chat|Return to chat)$/.test(
+            node.label ?? "",
+          ) ||
+            // A pushed page's back button is named after the list it returns to.
+            (/^(Chats|Threads)$/.test(node.label ?? "") &&
+              (node.rect?.y ?? Infinity) < snapshot.viewport.height / 4)),
       );
       if (!back && this.find(snapshot, threadListLabel)) {
         await this.agent(["keyboard", "dismiss"]).catch(() => undefined);

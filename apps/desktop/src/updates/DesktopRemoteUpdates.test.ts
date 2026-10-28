@@ -271,6 +271,31 @@ describe("DesktopRemoteUpdates", () => {
     );
   });
 
+  it.effect("fails a switch that leaves a same-track host below the checked release", () => {
+    const harness = makeHarness({ beforeSetUpdateChannel: Effect.void });
+
+    return runRemoteUpdatesTest(harness, ({ reports, requests }) =>
+      Effect.gen(function* () {
+        yield* Queue.offer(requests, {
+          ...request("req-behind"),
+          channel: "latest",
+          targetVersion: "1.2.5",
+        });
+        yield* settle;
+        // The feed lags npm and has nothing newer than this host's 1.2.3.
+        harness.emit("update-not-available");
+        yield* settle;
+        harness.emit("update-not-available");
+        yield* settle;
+
+        assert.deepEqual(
+          terminalReports(reports).map((report) => [report.outcome, report.reason]),
+          [["failed", "The desktop app found no build of 1.2.5."]],
+        );
+      }),
+    );
+  });
+
   it.effect("accepts a newer build than the checked release on the requested track", () => {
     const harness = makeHarness({ beforeSetUpdateChannel: Effect.void });
 

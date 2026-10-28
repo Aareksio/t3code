@@ -11,6 +11,7 @@ import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import { desktopUpdateChannelOf } from "@t3tools/shared/cliRelease";
+import { compareSemverVersions } from "@t3tools/shared/semver";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
@@ -242,8 +243,8 @@ export const listen: Effect.Effect<
             Effect.forkScoped,
           );
 
-        // A host leaving its build's track may need an older build, down to the checked release
-        // (the updater offers nothing below it), and a crossing that finds nothing has failed.
+        // A host leaving its build's track may need an older build, down to the checked release;
+        // the updater offers nothing below it.
         const crossing = (state: DesktopUpdateState) =>
           request.channel !== undefined &&
           request.targetVersion !== undefined &&
@@ -311,9 +312,12 @@ export const listen: Effect.Effect<
               return true;
             }
             case "done": {
-              // A crossing that finds nothing has no checked build; a same-track host is just current.
+              // A switch that leaves the host below its checked release did not reach it, on either
+              // track; a track-only host already at the release is done.
               const done =
-                crossing(state) && next.outcome === "up-to-date"
+                request.targetVersion !== undefined &&
+                next.outcome === "up-to-date" &&
+                compareSemverVersions(state.currentVersion, request.targetVersion) < 0
                   ? {
                       outcome: "failed" as const,
                       reason: `The desktop app found no build of ${request.targetVersion}.`,

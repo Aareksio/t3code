@@ -101,15 +101,17 @@ export function trackSwitchBlockReason(input: {
   readonly serverVersion: string;
   readonly targetVersion: string;
   readonly targetDatabaseMigration: number | undefined;
-  readonly databaseMigration: number;
+  /** Read only for a crossing; undefined when the database cannot be read. */
+  readonly databaseMigration: () => number | undefined;
 }): string | null {
   const from = cliReleaseChannelOf(input.serverVersion);
   const to = cliReleaseChannelOf(input.targetVersion);
   if (from === to || from === "preview" || to === "preview") return null;
-  if (input.targetDatabaseMigration === undefined) {
+  const databaseMigration = input.databaseMigration();
+  if (input.targetDatabaseMigration === undefined || databaseMigration === undefined) {
     return `Cannot confirm this database works with t3@${input.targetVersion}. Switch tracks from Settings → About → Update track, which checks it first.`;
   }
-  return input.targetDatabaseMigration < input.databaseMigration
+  return input.targetDatabaseMigration < databaseMigration
     ? `This database has changes t3@${input.targetVersion} does not support yet; it stays on this release.`
     : null;
 }
@@ -145,7 +147,7 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
       serverVersion: packageJson.version,
       targetVersion: input.targetVersion,
       targetDatabaseMigration: input.targetDatabaseMigration,
-      databaseMigration: databaseMigrationHead(serverConfig.dbPath),
+      databaseMigration: () => databaseMigrationHead(serverConfig.dbPath),
     });
 
   const update: ServerSelfUpdate["Service"]["update"] = Effect.fn(

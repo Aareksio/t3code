@@ -60,6 +60,21 @@ it.layer(NodeServices.layer)("service preflight database", (it) => {
       expect(result.status === "blocked" ? result.reason : "").toContain(`${newerId}_FromNightly`);
       // Servers report this head, so clients see a database a newer build migrated.
       expect(databaseMigrationHead(databasePath)).toBe(newerId);
+
+      // A database that exists but cannot be read has an unknown history, so it blocks.
+      const unreadable = path.join(path.dirname(databasePath), "unreadable.sqlite");
+      yield* fs.writeFileString(unreadable, "not a database");
+      expect(databaseMigrationHead(unreadable)).toBeUndefined();
+      expect(
+        runServicePreflight({
+          databasePath: unreadable,
+          launcherProtocol: SERVICE_LAUNCHER_PROTOCOL,
+        }).status,
+      ).toBe("blocked");
+      // A missing database is a fresh install.
+      expect(databaseMigrationHead(path.join(path.dirname(databasePath), "missing.sqlite"))).toBe(
+        BUILD_MIGRATION_HEAD,
+      );
     }),
   );
 });

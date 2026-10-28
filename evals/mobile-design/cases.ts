@@ -319,7 +319,7 @@ export const FLOWS = [
     source: REQUEST,
     steps: [
       { tap: "^Make remote coding feel local" },
-      { tap: "^(Git|Toggle panel)$", name: "Git or Panel" },
+      { tap: "^(Git|Panel|Toggle panel)$", name: "Git or Panel" },
       { tap: "^(Review changes|Diff$)", name: "Review changes or Diff" },
     ],
   },

@@ -112,7 +112,9 @@ async function captureScene(
   let problem = poseProblem;
   try {
     await simulator.home(THREAD_LIST);
-    for (const step of scene.steps) await simulator.perform(step, targets);
+    await simulator.withUsableTaps(async () => {
+      for (const step of scene.steps) await simulator.perform(step, targets);
+    });
     if ("ready" in scene) await simulator.waitFor(new RegExp(scene.ready), scene.title);
   } catch (error) {
     problem = joinProblems(problem, error instanceof Error ? error.message : String(error));

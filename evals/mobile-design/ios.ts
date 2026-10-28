@@ -108,6 +108,7 @@ export class Simulator {
   readonly udid: string;
   private readonly session: string;
   private appLandscape = false;
+  private metroUrl: string | null = null;
 
   private constructor(device: DeviceClassId, udid: string, session: string) {
     this.device = device;
@@ -156,7 +157,8 @@ export class Simulator {
    * Loads the JS straight from Metro. The dev menu's preferences hide its tools button and
    * launch sheet; the same flags on --initialUrl do not reach them.
    */
-  async launch(metroUrl: string) {
+  async launch(metroUrl: string, options: { readonly restart?: boolean } = {}) {
+    this.metroUrl = metroUrl;
     for (const [key, value] of [
       ["EXDevMenuShowFloatingActionButton", "NO"],
       ["EXDevMenuShowsAtLaunch", "NO"],
@@ -169,7 +171,7 @@ export class Simulator {
       // Launch arguments only reach a fresh process, so start it before agent-device attaches.
       await simctl(
         "launch",
-        ...(attempt > 0 ? ["--terminate-running-process"] : []),
+        ...(attempt > 0 || options.restart ? ["--terminate-running-process"] : []),
         this.udid,
         BUNDLE_ID,
         "--initialUrl",
@@ -345,7 +347,7 @@ export class Simulator {
 
   /** Backs out of sheets, pushed screens and the keyboard until the thread list shows. */
   async home(threadListLabel: RegExp) {
-    for (let attempt = 0; attempt < 8; attempt += 1) {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
       const snapshot = await this.snapshot();
       // A thread's back button is labelled with the tab it returns to, so only count it up top.
       // The iPad sidebar's section footer "Back" is not a button, so accept it by label alone.
@@ -378,7 +380,11 @@ export class Simulator {
       else await this.agent(["back"]).catch(() => undefined);
       await delay(1_000);
     }
-    throw new Error("could not return to the thread list");
+    // Some screens offer no way back that works, such as an iPad sidebar section opened by a
+    // link; a fresh launch always opens on the thread list.
+    if (!this.metroUrl) throw new Error("could not return to the thread list");
+    await this.launch(this.metroUrl, { restart: true });
+    await this.waitFor(threadListLabel, "the thread list after a relaunch", { offScreen: true });
   }
 
   /**
@@ -405,6 +411,20 @@ export class Simulator {
       return `the ${this.device} did not rotate to ${shape}`;
     }
     return undefined;
+  }
+
+  /**
+   * Runs `steps` in portrait when the iPad is in landscape, then turns back. XCTest sends taps to
+   * a landscape iPad in portrait coordinates, so they land on the wrong element.
+   */
+  async withUsableTaps(steps: () => Promise<void>) {
+    if (this.device !== "ipad" || !this.appLandscape) return steps();
+    await this.orient("portrait");
+    try {
+      await steps();
+    } finally {
+      this.appLandscape = await this.orient("landscape");
+    }
   }
 
   /** Returns whether the app now lays out in landscape. */

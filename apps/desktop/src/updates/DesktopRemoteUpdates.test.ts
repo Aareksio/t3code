@@ -599,6 +599,36 @@ describe("DesktopRemoteUpdates", () => {
     );
   });
 
+  it.effect("restores the track when a prepared switch is never committed", () => {
+    const harness = makeHarness({ beforeSetUpdateChannel: Effect.void });
+
+    return runRemoteUpdatesTest(harness, ({ reports, requests }) =>
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        const nightly = "1.2.4-nightly.20261027.1";
+        yield* Queue.offer(requests, {
+          ...request("req-abandoned"),
+          channel: "nightly",
+          targetVersion: nightly,
+        });
+        yield* settle;
+        harness.emit("update-available", { version: nightly });
+        yield* settle;
+        harness.emit("update-downloaded", { version: nightly });
+        yield* settle;
+        assert.deepEqual(
+          terminalReports(reports).map((report) => report.outcome),
+          ["ready-to-install"],
+        );
+
+        yield* TestClock.adjust(Duration.minutes(6));
+        yield* settle;
+
+        assert.equal((yield* updates.getState).channel, "latest");
+      }),
+    );
+  });
+
   it.effect("cancels a track switch while its own feed check is still running", () => {
     const releaseCheck = Deferred.makeUnsafe<void>();
     const harness = makeHarness({

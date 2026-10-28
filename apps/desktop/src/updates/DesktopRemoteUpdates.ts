@@ -114,6 +114,19 @@ export const listen: Effect.Effect<
       Effect.flatMap((fiber) => Ref.set(pendingRestoreRef, Option.some(fiber))),
     );
 
+  const expireSwitch = (requestId: string) =>
+    Ref.modify(preparedUpdateRef, (prepared) =>
+      Option.isSome(prepared) &&
+      prepared.value.requestId === requestId &&
+      prepared.value.status === "prepared"
+        ? ([prepared, Option.none<PreparedUpdate>()] as const)
+        : ([Option.none<PreparedUpdate>(), prepared] as const),
+    ).pipe(
+      Effect.flatMap((expired) =>
+        Option.isSome(expired) ? scheduleRestore(expired.value) : Effect.void,
+      ),
+    );
+
   const failPrepared = Effect.fn("DesktopRemoteUpdates.failPrepared")(function* (
     requestId: string,
     reason: string,
@@ -344,6 +357,13 @@ export const listen: Effect.Effect<
                 }),
               );
               keepsTrack = true;
+              if (request.channel !== undefined) {
+                // With no commit (the client went away), the switch's track must not outlive it.
+                yield* Effect.sleep(PREPARED_UPDATE_TTL).pipe(
+                  Effect.andThen(expireSwitch(request.requestId)),
+                  Effect.forkDetach,
+                );
+              }
               yield* publishReport(state, { outcome: "ready-to-install" }, request.requestId);
               yield* logInfo("remote update prepared", { requestId: request.requestId });
               return true;

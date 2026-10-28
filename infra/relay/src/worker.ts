@@ -481,6 +481,11 @@ export const layer = Api.make(
                 ),
               ),
             ),
+            Effect.andThen(
+              DeliveryAttempts.DeliveryAttempts.pipe(
+                Effect.flatMap((attempts) => attempts.pruneExpired),
+              ),
+            ),
             Effect.catchCause((cause) =>
               Cause.hasInterrupts(cause)
                 ? Effect.interrupt
@@ -571,5 +576,3 @@ export const layer = Api.make(
     ),
   ),
 );
-
-export default layer;

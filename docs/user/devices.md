@@ -129,13 +129,21 @@ localhost without forwarding or another reachable address.
 Android emulators across machines. If you run a Simlock gateway, T3 can lease
 devices from it. Simlock is new and unreleased, so this integration is an
 alpha: it may change or stop working with a newer Simlock. T3 does not install
-or manage Simlock; set up the gateway and its workers yourself.
+or manage Simlock; set up the gateway and its workers yourself. It needs a
+gateway and workers built from Simlock's `main` at
+[6316e10](https://github.com/callstackincubator/simlock/commit/6316e10) or
+later, the first with a lease holder's screen and input.
 
-Turn on **Settings → Labs → Simlock device hosts (alpha)**, then add the
-gateway in Settings → Integrations → Devices with an **agent token**
-(`simlock token create --role agent`). It leases devices and reaches only its
-own leases. Workers need `capabilities.stream.enabled` and
-`capabilities.input.enabled` for the live screen and for input.
+Turn on **Settings → Labs → Simlock device hosts (alpha)** and the **Device
+hub** in Settings → Devices, then add the gateway there with an **agent token**
+(`simlock --gateway token create --role agent`). Give each T3 server its own
+token: Simlock counts every lease made with one token against the same
+requester, and allows one at a time unless the gateway's
+`lease.maxPerRequester` is raised to the host's **Devices at once**. The token
+leases devices and reaches only its own leases, but commands on a leased device
+run on its worker, so treat it like shell access to your workers. The gateway
+and workers need `capabilities.stream.enabled` and `capabilities.input.enabled`
+for the live screen and for input.
 
 The picker lists the models your workers can make. Opening one takes a lease;
 closing it with **Return device to the pool**, or removing the host, returns it

@@ -2,6 +2,7 @@
 // Proxy with environment read scope for streams and operate scope for input and tuning.
 import { AuthOrchestrationReadScope, AuthOrchestrationOperateScope } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import {
   HttpClient,
@@ -75,6 +76,20 @@ const forwardHeaders = (request: HttpServerRequest.HttpServerRequest, origin: st
   return headers;
 };
 
+// Effect drops its listeners before closing a socket that is still connecting, and `ws` then
+// emits an `error` nobody handles, which exits the server.
+export const upstreamWebSocketConstructor = Layer.effect(
+  Socket.WebSocketConstructor,
+  Effect.gen(function* () {
+    const make = yield* Socket.WebSocketConstructor;
+    return (url, options) => {
+      const socket = make(url, options);
+      socket.addEventListener("error", () => undefined);
+      return socket;
+    };
+  }),
+).pipe(Layer.provide(NodeSocket.layerWebSocketConstructor));
+
 const proxyWebSocket = Effect.fn("DeviceHubProxy.proxyWebSocket")(function* (
   request: HttpServerRequest.HttpServerRequest,
   upstreamUrl: string,
@@ -86,7 +101,7 @@ const proxyWebSocket = Effect.fn("DeviceHubProxy.proxyWebSocket")(function* (
     openTimeout: "10 seconds",
     ...(protocols.length > 0 ? { protocols: [...protocols] } : {}),
     ...(Object.keys(headers).length > 0 ? { headers: { ...headers } } : {}),
-  }).pipe(Effect.provide(NodeSocket.layerWebSocketConstructor));
+  }).pipe(Effect.provide(upstreamWebSocketConstructor));
   yield* Effect.scoped(
     Effect.gen(function* () {
       const writeToClient = yield* client.writer;

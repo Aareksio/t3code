@@ -296,6 +296,34 @@ describe("DesktopRemoteUpdates", () => {
     );
   });
 
+  it.effect("fails a crossing to an older-numbered Stable that the feed does not offer", () => {
+    const harness = makeHarness({
+      appVersion: "1.2.4-nightly.20261027.1",
+      beforeSetUpdateChannel: Effect.void,
+    });
+
+    return runRemoteUpdatesTest(harness, ({ reports, requests }) =>
+      Effect.gen(function* () {
+        yield* Queue.offer(requests, {
+          ...request("req-to-stable"),
+          channel: "latest",
+          targetVersion: "1.2.3",
+        });
+        yield* settle;
+        harness.emit("update-not-available");
+        yield* settle;
+        harness.emit("update-not-available");
+        yield* settle;
+
+        // Still on Nightly, though the target is numbered below this build.
+        assert.deepEqual(
+          terminalReports(reports).map((report) => [report.outcome, report.reason]),
+          [["failed", "The desktop app found no build of 1.2.3."]],
+        );
+      }),
+    );
+  });
+
   it.effect("accepts a newer build than the checked release on the requested track", () => {
     const harness = makeHarness({ beforeSetUpdateChannel: Effect.void });
 

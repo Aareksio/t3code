@@ -312,12 +312,13 @@ export const listen: Effect.Effect<
               return true;
             }
             case "done": {
-              // A switch that leaves the host below its checked release did not reach it, on either
-              // track; a track-only host already at the release is done.
+              // A switch that leaves the host on its old track, or below its checked release, did
+              // not reach it; a track-only host already at the release is done.
               const done =
                 request.targetVersion !== undefined &&
                 next.outcome === "up-to-date" &&
-                compareSemverVersions(state.currentVersion, request.targetVersion) < 0
+                (crossing(state) ||
+                  compareSemverVersions(state.currentVersion, request.targetVersion) < 0)
                   ? {
                       outcome: "failed" as const,
                       reason: `The desktop app found no build of ${request.targetVersion}.`,

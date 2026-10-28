@@ -760,15 +760,37 @@ export default function ChatView(props: ChatViewProps) {
       });
     }
   }
+  const nowMinute = useNowMinute();
+  const draftDefaultModelSelection = draftThread
+    ? resolveProjectSettings(
+        settings,
+        fallbackDraftProject?.id ?? null,
+        fallbackDraftProject ?? undefined,
+      ).settings.defaultModelSelection
+    : null;
+  const draftModelResolution = draftThread
+    ? resolveNewThreadModelSelection({
+        defaultSelection:
+          draftDefaultModelSelection ??
+          resolveProjectDefaultProviderModelSelection(
+            providersByEnvironment.get(draftThread.environmentId) ?? [],
+            settings,
+            draftThread.projectId,
+          ),
+        fallbackSelection: settings.fallbackModelSelection,
+        providers: providersByEnvironment.get(draftThread.environmentId) ?? [],
+        settings,
+        projectId: draftThread.projectId,
+        now: Date.parse(`${nowMinute}:00Z`),
+      })
+    : null;
+  const draftFallback = draftModelResolution?.fallback ? draftModelResolution : null;
   const localDraftThread = draftThread
     ? buildLocalDraftThread(
         threadId,
         draftThread,
-        resolveProjectSettings(
-          settings,
-          fallbackDraftProject?.id ?? null,
-          fallbackDraftProject ?? undefined,
-        ).settings.defaultModelSelection ?? NO_PROVIDER_MODEL_SELECTION,
+        (draftFallback ? draftFallback.selection : draftDefaultModelSelection) ??
+          NO_PROVIDER_MODEL_SELECTION,
       )
     : undefined;
   const isServerThread = serverThread !== null;
@@ -1060,22 +1082,10 @@ export default function ChatView(props: ChatViewProps) {
   const activeProjectScripts = activeProject ? resolveProjectScripts(settings, activeProject) : [];
   const { projectCloneBannerItem, projectCloneSendBlockReason } =
     useProjectCloneBanner(activeProjectRef);
-  const nowMinute = useNowMinute();
-  const defaultModelResolution = resolveNewThreadModelSelection({
-    defaultSelection:
-      activeProjectSettings.settings.defaultModelSelection ??
-      resolveProjectDefaultProviderModelSelection(
-        providersByEnvironment.get(activeThread?.environmentId ?? environmentId) ?? [],
-        settings,
-        activeProject?.id ?? null,
-      ),
-    fallbackSelection: settings.fallbackModelSelection,
-    providers: providersByEnvironment.get(activeThread?.environmentId ?? environmentId) ?? [],
-    settings,
-    projectId: activeProject?.id ?? null,
-    now: Date.parse(`${nowMinute}:00Z`),
-  });
-  const activeProjectDefaultModelSelection = activeProjectSettings.settings.defaultModelSelection;
+  const activeProjectDefaultModelSelection =
+    !isServerThread && draftFallback
+      ? draftFallback.selection
+      : activeProjectSettings.settings.defaultModelSelection;
   const handleNewThreadInActiveProject = () => {
     startNewThreadForProject(activeProjectRef, handleNewThread);
   };
@@ -2548,25 +2558,25 @@ export default function ChatView(props: ChatViewProps) {
         })
       : null;
   const composerBannerItems = (() => {
+    const fallbackSelection = draftFallback?.selection;
     const fallback =
       !isServerThread &&
       multipleModelSelections === null &&
       !composerModelSelectionExplicit &&
-      defaultModelResolution.fallback &&
+      draftFallback?.fallback &&
       (!composerSelectedModelSelection ||
-        (composerSelectedModelSelection.instanceId ===
-          defaultModelResolution.selection?.instanceId &&
-          composerSelectedModelSelection.model === defaultModelResolution.selection?.model))
-        ? defaultModelResolution.fallback
+        (composerSelectedModelSelection.instanceId === fallbackSelection?.instanceId &&
+          composerSelectedModelSelection.model === fallbackSelection?.model))
+        ? draftFallback.fallback
         : null;
     const fallbackItems: ComposerBannerStackItem[] =
-      fallback && defaultModelResolution.selection
+      fallback && fallbackSelection
         ? [
             {
               id: "fallback-model",
               variant: "info",
               icon: null,
-              title: `${fallback.provider.displayName ?? fallback.provider.driver} is out of usage${fallback.resetsAt ? ` until ${new Date(fallback.resetsAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : ""}. Using ${providerStatuses.find((provider) => provider.instanceId === defaultModelResolution.selection?.instanceId)?.models.find((model) => model.slug === defaultModelResolution.selection?.model)?.name ?? defaultModelResolution.selection.model}.`,
+              title: `${fallback.provider.displayName ?? fallback.provider.driver} is out of usage${fallback.resetsAt ? ` until ${new Date(fallback.resetsAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : ""}. Using ${providerStatuses.find((provider) => provider.instanceId === fallbackSelection.instanceId)?.models.find((model) => model.slug === fallbackSelection.model)?.name ?? fallbackSelection.model}.`,
             },
           ]
         : [];

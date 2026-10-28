@@ -55,7 +55,14 @@ export const SIMULATORS = {
 
 export type StepAction =
   | { readonly link: string }
-  | { readonly tap: string }
+  | {
+      /** One pattern, or several in order of preference; the first one on screen is tapped. */
+      readonly tap: string | ReadonlyArray<string>;
+      /** Skip the step when nothing matches within a few seconds. */
+      readonly optional?: true;
+      /** Skip the step when this label already shows. */
+      readonly skipIf?: string;
+    }
   | { readonly type: string }
   | { readonly scroll: "up" | "down" }
   | { readonly focus: "composer" }
@@ -178,7 +185,7 @@ export const SCENES = [
     title: "Agent asks two questions",
     source: `${REQUEST}; #24290 and #24291 (Duo question panel)`,
     steps: [thread("question")],
-    ready: "^Submit answers$",
+    ready: "^(Submit answers|Next question)$",
     desktop: { path: "/{thread:question}" },
   },
   {
@@ -307,7 +314,7 @@ export const FLOWS = [
     steps: [
       { tap: "^Plan offline mode$" },
       { tap: "^Last 50 threads" },
-      { scroll: "down" },
+      { tap: "^Next question$", optional: true },
       { tap: "^Server state" },
       { tap: "^Submit answers$" },
     ],
@@ -318,8 +325,8 @@ export const FLOWS = [
     source: REQUEST,
     steps: [
       { tap: "^Make remote coding feel local" },
-      { tap: "^(Git|Panel|Toggle panel)$" },
-      { tap: "^(Review changes|Diff$)" },
+      { tap: ["^Changes [+]", "^(Git|Panel|Toggle panel)$"] },
+      { tap: "^(Review changes|Diff$)", skipIf: "^Select diff$" },
     ],
   },
   {
@@ -342,7 +349,7 @@ export const FLOWS = [
       { tap: "^Show a reconnect banner$" },
       { tap: "^Model and reasoning settings" },
       { tap: "^GPT-5.3 Codex" },
-      { tap: "^Save thread settings$" },
+      { tap: "^Save thread settings$", optional: true },
     ],
   },
 ] as const satisfies ReadonlyArray<Flow>;

@@ -174,6 +174,7 @@ async function captureFlow(
     await frame("Start");
     for (const step of flow.steps) {
       const tapped = await simulator.perform(step, targets);
+      if (tapped === null) continue;
       // The label actually tapped, so the filmstrip names what this build shows.
       const action =
         "tap" in step

@@ -185,7 +185,7 @@ export class Simulator {
         { timeoutMs: 180_000 },
       ).catch(() => null);
       if (snapshot && this.find(snapshot, loaded)) return;
-      if (snapshot) await this.tap(/^Reload$/).catch(() => undefined);
+      if (snapshot) await this.tap([/^Reload$/]).catch(() => undefined);
     }
     throw new Error("The app did not load from Metro.");
   }
@@ -319,10 +319,14 @@ export class Simulator {
     );
   }
 
-  /** Taps the first element labelled `label`, and returns the label it tapped. */
-  async tap(label: RegExp): Promise<string> {
-    const node = this.find(await this.waitFor(label, `'${label.source}'`), label);
-    if (!node) throw new Error(`nothing labelled ${label}`);
+  /** Taps the first element matching the first pattern that shows, and returns its label. */
+  async tap(patterns: ReadonlyArray<RegExp>, timeoutMs?: number): Promise<string> {
+    const any = new RegExp(patterns.map((pattern) => `(?:${pattern.source})`).join("|"));
+    const snapshot = await this.waitFor(any, `'${any.source}'`, timeoutMs ? { timeoutMs } : {});
+    const node = patterns
+      .map((pattern) => this.find(snapshot, pattern))
+      .find((candidate) => candidate !== undefined);
+    if (!node) throw new Error(`nothing labelled ${any}`);
     await this.press(node);
     return (node.label ?? "").split(",")[0]!.slice(0, 40);
   }
@@ -337,12 +341,22 @@ export class Simulator {
     return composer;
   }
 
-  /** Performs one step; returns the tapped label for a `tap` step. */
-  async perform(step: StepAction, targets: LinkTargets): Promise<string | undefined> {
+  /** Performs one step; returns the tapped label for a `tap` step, or null when it was skipped. */
+  async perform(step: StepAction, targets: LinkTargets): Promise<string | null | undefined> {
     let tapped: string | undefined;
     if ("link" in step) await this.openUrl(`t3code://${expandPath(step.link, targets)}`);
-    else if ("tap" in step) tapped = await this.tap(new RegExp(step.tap));
-    else if ("type" in step) await this.agent(["type", step.type]);
+    else if ("tap" in step) {
+      if (step.skipIf && this.find(await this.snapshot(), new RegExp(step.skipIf))) return null;
+      const patterns = (typeof step.tap === "string" ? [step.tap] : step.tap).map(
+        (pattern) => new RegExp(pattern),
+      );
+      try {
+        tapped = await this.tap(patterns, step.optional ? 5_000 : undefined);
+      } catch (error) {
+        if (step.optional) return null;
+        throw error;
+      }
+    } else if ("type" in step) await this.agent(["type", step.type]);
     else if ("scroll" in step) await this.agent(["scroll", step.scroll]);
     else if ("focus" in step) await this.press(await this.composer());
     else await this.agent(["fill", `@${(await this.composer()).ref}`, ""]);
@@ -388,6 +402,13 @@ export class Simulator {
     // Some screens offer no way back that works, such as an iPad sidebar section opened by a
     // link; a fresh launch always opens on the thread list.
     if (!this.metroUrl) throw new Error("could not return to the thread list");
+    const stuck = await this.snapshot().catch(() => null);
+    process.stderr.write(
+      `[mobile-design] ${this.device}: no way back to the thread list worked, relaunching (screen: ${stuck?.nodes
+        .flatMap((node) => (node.label ? [`${node.kind}:${node.label.slice(0, 30)}`] : []))
+        .slice(0, 14)
+        .join(" | ")})\n`,
+    );
     await this.launch(this.metroUrl, { restart: true });
     await this.waitFor(threadListLabel, "the thread list after a relaunch", { offScreen: true });
   }

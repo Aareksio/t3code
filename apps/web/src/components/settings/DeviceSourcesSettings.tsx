@@ -91,6 +91,11 @@ interface SourceRow {
   readonly kind?: string;
   readonly description: ReactNode;
   readonly environments: ReadonlyArray<SourceEnvironment>;
+  /**
+   * One machine or account every environment reaches the same way (an SSH host, EAS, a Simlock
+   * pool), so its platforms are the same for all of them. Local simulators differ per machine.
+   */
+  readonly shared: boolean;
   readonly actions?: ReactNode;
 }
 
@@ -341,6 +346,7 @@ export function DeviceSourcesSettings(props: {
 
   rows.push({
     key: "local",
+    shared: false,
     icon: <HardDriveIcon className="size-3.5" />,
     title: "Local simulators",
     description:
@@ -388,6 +394,7 @@ export function DeviceSourcesSettings(props: {
     const host = group.host;
     rows.push({
       key: `ssh:${host.id}:${group.members.map((member) => member.environmentId).join(",")}`,
+      shared: true,
       icon: <ServerIcon className="size-3.5" />,
       title: host.label,
       kind: "SSH",
@@ -432,6 +439,7 @@ export function DeviceSourcesSettings(props: {
     for (const host of easHosts.values()) {
       rows.push({
         key: `eas:${host.id}`,
+        shared: true,
         icon: <CloudIcon className="size-3.5" />,
         title: host.label,
         kind: "EAS",
@@ -469,6 +477,7 @@ export function DeviceSourcesSettings(props: {
       const edit = () => setEditing({ kind: "simlock", host, isNew: false });
       rows.push({
         key: `simlock:${host.id}`,
+        shared: true,
         icon: <ContainerIcon className="size-3.5" />,
         title: host.label,
         kind: "Simlock",
@@ -595,26 +604,34 @@ const PLATFORMS = [
   { platform: "android", label: "Android", Icon: AndroidIcon },
 ] as const satisfies ReadonlyArray<{ platform: DevicePlatform; label: string; Icon: unknown }>;
 
-/**
- * The platforms a source offers, as icons. An icon is dimmed where no environment has the
- * platform and carries a warning mark where only some do; hovering shows each environment.
- */
-function SourcePlatforms(props: { title: string; environments: ReadonlyArray<SourceEnvironment> }) {
-  const added = props.environments.filter((environment) => environment.added);
+/** The platforms a source offers: one icon each, solid where available, muted where not. */
+function SourcePlatforms(props: { row: SourceRow }) {
+  const added = props.row.environments.filter((environment) => environment.added);
   const known = added.filter((environment) => environment.platforms !== undefined);
-  const shown = PLATFORMS.filter(({ platform }) =>
+  return PLATFORMS.filter(({ platform }) =>
     known.some((environment) =>
       environment.platforms?.some((candidate) => candidate.platform === platform),
     ),
-  );
-  if (shown.length === 0) return null;
-  const availableOn = (platform: DevicePlatform) =>
-    known.filter((environment) =>
-      environment.platforms?.some(
-        (candidate) => candidate.platform === platform && candidate.available,
-      ),
-    ).length;
-  const several = props.environments.length > 1;
+  ).map((entry) => <PlatformIcon key={entry.platform} {...entry} row={props.row} known={known} />);
+}
+
+function PlatformIcon(props: {
+  platform: DevicePlatform;
+  label: string;
+  Icon: (typeof PLATFORMS)[number]["Icon"];
+  row: SourceRow;
+  known: ReadonlyArray<SourceEnvironment>;
+}) {
+  const availability = (environment: SourceEnvironment) =>
+    environment.platforms?.find((candidate) => candidate.platform === props.platform);
+  const availableOn = props.known.filter((environment) => availability(environment)?.available);
+  const several = props.row.environments.length > 1;
+  // A shared source answers the same everywhere; any environment that reached it speaks for all.
+  const sharedAnswer = props.known.map(availability).find(Boolean);
+  const available = props.row.shared ? sharedAnswer?.available === true : availableOn.length > 0;
+  const partial = !props.row.shared && available && availableOn.length < props.known.length;
+  const connected = props.row.environments.filter((environment) => environment.added);
+  const notAdded = props.row.environments.filter((environment) => !environment.added);
   return (
     <Popover>
       <PopoverTrigger
@@ -624,65 +641,73 @@ function SourcePlatforms(props: { title: string; environments: ReadonlyArray<Sou
         render={
           <button
             type="button"
-            aria-label={`${props.title}: ${shown
-              .map(
-                ({ platform, label }) => `${label} on ${availableOn(platform)} of ${known.length}`,
-              )
-              .join(", ")}. Show each environment`}
-            className="flex shrink-0 items-center gap-2 rounded-md px-1 py-0.5 text-muted-foreground outline-hidden hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+            aria-label={`${props.row.title}: ${props.label} ${available ? "available" : "not available"}`}
+            className={cn(
+              "relative grid size-6 shrink-0 place-items-center rounded-md outline-hidden hover:bg-accent focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+              available ? "text-foreground" : "text-muted-foreground/45",
+            )}
           />
         }
       >
-        {shown.map(({ platform, Icon }) => {
-          const count = availableOn(platform);
-          return (
-            <span key={platform} className={cn("relative", count === 0 && "opacity-40")}>
-              <Icon className={cn("size-3.5", platform === "ios" && "-translate-y-px")} />
-              {count > 0 && count < known.length ? (
-                <span
-                  aria-hidden
-                  className="absolute -top-0.5 -right-1 size-1.5 rounded-full bg-warning ring-2 ring-background"
-                />
-              ) : null}
-            </span>
-          );
-        })}
+        <props.Icon className={cn("size-3.5", props.platform === "ios" && "-translate-y-px")} />
+        {partial ? (
+          <span
+            aria-hidden
+            className="absolute top-0.5 right-0.5 size-1.5 rounded-full bg-warning ring-2 ring-background"
+          />
+        ) : null}
       </PopoverTrigger>
-      <PopoverPopup align="end" width="md" padding="none">
-        <div className="divide-y divide-border/60">
-          {props.environments.map((environment) => (
-            <section key={environment.environmentId} className="px-3 py-2.5">
-              {several ? (
-                <h4 className="pb-1 text-xs font-medium text-muted-foreground">
-                  {environment.label}
-                </h4>
-              ) : null}
-              {!environment.added ? (
-                <p className="text-xs text-muted-foreground">Not added here</p>
-              ) : !environment.platforms ? (
-                <p className="text-xs text-muted-foreground">Not reached yet</p>
-              ) : (
-                <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
-                  {PLATFORMS.map(({ platform, label }) => {
-                    const availability = environment.platforms?.find(
-                      (candidate) => candidate.platform === platform,
-                    );
-                    return (
-                      <Fragment key={platform}>
-                        <dt className="text-muted-foreground">{label}</dt>
-                        <dd className={availability?.available ? "" : "text-muted-foreground"}>
-                          {availability?.available
-                            ? "Available"
-                            : (availability?.reason ?? "Not available")}
+      <PopoverPopup side="top" align="end" width="sm">
+        <p className="text-sm font-medium">
+          {props.label}{" "}
+          {available ? (partial ? "available on some" : "available") : "not available"}
+        </p>
+        {props.row.shared ? (
+          <>
+            {!available && sharedAnswer?.reason ? (
+              <p className="mt-1 text-xs text-muted-foreground">{sharedAnswer.reason}</p>
+            ) : null}
+            {several ? (
+              <dl className="mt-2 space-y-1.5 text-xs">
+                {(
+                  [
+                    ["Connected", connected],
+                    ["Not added", notAdded],
+                  ] as const
+                ).map(([heading, environments]) =>
+                  environments.length > 0 ? (
+                    <div key={heading}>
+                      <dt className="text-muted-foreground">{heading}</dt>
+                      {environments.map((environment) => (
+                        <dd key={environment.environmentId} className="truncate">
+                          {environment.label}
                         </dd>
-                      </Fragment>
-                    );
-                  })}
-                </dl>
-              )}
-            </section>
-          ))}
-        </div>
+                      ))}
+                    </div>
+                  ) : null,
+                )}
+              </dl>
+            ) : null}
+          </>
+        ) : several ? (
+          <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
+            {props.known.map((environment) => {
+              const entry = availability(environment);
+              return (
+                <Fragment key={environment.environmentId}>
+                  <dt className="text-muted-foreground">{environment.label}</dt>
+                  <dd className={entry?.available ? "" : "text-muted-foreground"}>
+                    {entry?.available ? "Available" : (entry?.reason ?? "Not available")}
+                  </dd>
+                </Fragment>
+              );
+            })}
+          </dl>
+        ) : !available ? (
+          <p className="mt-1 text-xs text-muted-foreground">
+            {availability(props.known[0]!)?.reason ?? "Not set up on this machine."}
+          </p>
+        ) : null}
       </PopoverPopup>
     </Popover>
   );
@@ -744,7 +769,9 @@ function DeviceSourceRow(props: { row: SourceRow }) {
           {pending.status.label}
         </span>
       ) : (
-        <SourcePlatforms title={row.title} environments={row.environments} />
+        <div className="flex shrink-0 items-center gap-0.5">
+          <SourcePlatforms row={row} />
+        </div>
       )}
       {row.actions ? <div className="flex shrink-0 items-center gap-1">{row.actions}</div> : null}
     </div>
